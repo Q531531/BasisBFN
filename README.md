@@ -141,7 +141,8 @@ python3 train.py \
   --device cuda
 ```
 
-训练入口要求配置、代码指纹和对应 arm 的 preflight／200-step profile 一致。
+训练入口核对配置、代码、SSR 架构与权重、数据清单和对应 arm／seed 的
+CUDA preflight／200-step profile。训练 GPU 必须与产物一致。
 预检覆盖冻结状态、参数量、初始化、损失有效性与梯度可达性。
 其它分支和种子使用相同流程，分别生成配置和运行目录。
 
@@ -162,6 +163,10 @@ python3 infer.py \
   --output results/basisbfn \
   --device cuda --deterministic
 ```
+
+换机器后，checkpoint 中保存的 SSR 路径可能已失效。可额外传
+`--config` 指定相同模型设置、当前 SSR 路径的配置；推理加载器只允许迁移
+SSR 路径，拒绝修改模型语义。
 
 按明确的图像对清单进行验证集评测：
 
@@ -205,6 +210,8 @@ sgbformer/models/bfn.py                # Gaussian sender、贝叶斯更新和离
 sgbformer/models/foundation.py         # 外部冻结 SSR 集成
 sgbformer/models/model.py              # 完整模型与训练输出
 sgbformer/losses.py                    # 训练损失组合
+sgbformer/basisbfn.py                  # 独立的四组配置与产物校验
+sgbformer/configs/basisbfn.yaml        # 随 Python 包分发的公共契约
 sgbformer/data/                        # 图像对加载与采样
 configs/experiments/basisbfn_*.yaml     # 主模型和参数匹配的消融配置
 scripts/smoke_basisbfn.py              # 无权重的模块自检
@@ -216,7 +223,8 @@ tests/                                # 回归测试
 ```
 
 Python 导入命名空间保留 `sgbformer`，公开模型／损失名称为 `BasisBFN` 和
-`BasisBFNLoss`；旧名称仍作为 checkpoint 兼容别名。
+`BasisBFNLoss`；旧名称仍作为 checkpoint 兼容别名。历史实验版本不在当前
+发布目录中，可通过 Git 历史查看。
 
 ## 第三方来源与引用
 

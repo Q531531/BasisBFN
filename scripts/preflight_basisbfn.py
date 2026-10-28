@@ -22,13 +22,11 @@ from sgbformer.models import CoefficientStateBasisReadout, build_model
 from sgbformer.protocol import (
     foundation_artifact_fingerprint,
     implementation_fingerprint,
+    manifest_fingerprints,
+    resolved_config_sha256,
     sha256_file,
 )
 from sgbformer.utils import parameter_count, seed_everything
-from sgbformer.v27 import (
-    V27_EXPECTED_TRAINABLE_PARAMETERS,
-    resolved_config_sha256,
-)
 from sgbformer.basisbfn import (
     BASISBFN_ARMS,
     BASISBFN_EXPECTED_DEV_PAIRS,
@@ -57,15 +55,6 @@ MATRIX_CONFIGS = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
-    parser.add_argument(
-        "--reference-c0",
-        default=(
-            PROJECT_ROOT
-            / "configs"
-            / "experiments"
-            / "ssr_residual_v27_c0_proxy.yaml"
-        ),
-    )
     parser.add_argument(
         "--matrix-config-dir",
         default=PROJECT_ROOT / "configs" / "experiments",
@@ -116,8 +105,6 @@ def assert_structure(
             f"Expected {BASISBFN_EXPECTED_TRAINABLE_PARAMETERS} "
             f"trainable parameters, got {count}"
         )
-    if count >= 2 * V27_EXPECTED_TRAINABLE_PARAMETERS:
-        raise AssertionError("BasisBFN arm exceeds the 2x C0 ceiling")
     readout = coefficient_readout(model)
     expected = BASISBFN_ARMS[arm]
     if readout.update_mode != expected["update_mode"]:
@@ -171,12 +158,6 @@ def assert_structure(
         raise AssertionError("Posterior gate is not neutral initialized")
     return {
         "trainable_parameters": count,
-        "v27_c0_trainable_parameters": V27_EXPECTED_TRAINABLE_PARAMETERS,
-        "additional_parameters_vs_v27_c0": (
-            count - V27_EXPECTED_TRAINABLE_PARAMETERS
-        ),
-        "ratio_vs_v27_c0": count / V27_EXPECTED_TRAINABLE_PARAMETERS,
-        "below_2x_v27_c0": True,
         "trainable_parameter_names": trainable_names,
         "foundation_trainable_parameters": 0,
         "num_bases": readout.num_bases,
@@ -371,21 +352,19 @@ def check_gradient_path(
 def main() -> None:
     args = parse_args()
     config_path = Path(args.config).expanduser().resolve()
-    reference_path = Path(args.reference_c0).expanduser().resolve()
     matrix_dir = Path(args.matrix_config_dir).expanduser().resolve()
     config = load_config(config_path)
-    reference = load_config(reference_path)
-    arm = validate_basisbfn_config(config, reference)
-    causal_audit = audit_basisbfn_config(config, reference)
+    arm = validate_basisbfn_config(config)
+    causal_audit = audit_basisbfn_config(config)
     matrix_configs = {
         matrix_arm: load_config(matrix_dir / filename)
         for matrix_arm, filename in MATRIX_CONFIGS.items()
     }
-    matrix_audit = audit_basisbfn_matrix(matrix_configs, reference)
+    matrix_audit = audit_basisbfn_matrix(matrix_configs)
 
     device = torch.device(args.device)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is unavailable")
+    if device.type != "cuda" or not torch.cuda.is_available():
+        raise RuntimeError("BasisBFN preflight requires CUDA; CPU unit tests are separate")
     experiment_seed = int(config["seed"])
     seed_everything(experiment_seed)
     train_dataset = build_dataset(
@@ -422,46 +401,26 @@ def main() -> None:
         device,
     )
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "protocol": BASISBFN_PROTOCOL,
         "arm": arm,
         "status": "passed",
-        "device": str(device),
+        "device_type": device.type,
+        "device": torch.cuda.get_device_name(device),
         "implementation": implementation_fingerprint(),
         "config": {
             "path": str(config_path),
             "source_sha256": sha256_file(config_path),
             "resolved_sha256": resolved_config_sha256(config),
         },
-        "reference_c0": {
-            "path": str(reference_path),
-            "source_sha256": sha256_file(reference_path),
-            "resolved_sha256": resolved_config_sha256(reference),
-        },
         "foundation_artifacts": foundation_artifact_fingerprint(config),
-        "manifests": {
-            "train": {
-                "path": config["data"]["train"]["pairs_file"],
-                "sha256": sha256_file(
-                    config["data"]["train"]["pairs_file"]
-                ),
-                "pairs": len(train_dataset),
-            },
-            "dev": {
-                "path": config["data"]["val"]["pairs_file"],
-                "sha256": sha256_file(
-                    config["data"]["val"]["pairs_file"]
-                ),
-                "pairs": len(dev_dataset),
-                "identity_indices": identity_indices,
-            },
-        },
+        "manifests": manifest_fingerprints(config),
+        "identity_indices": identity_indices,
         "causal_audit": causal_audit,
         "matrix_audit": matrix_audit,
         "sampling": {
             "mode": "shuffle",
             "category_balanced": False,
-            "matches_v27_c0": True,
         },
         "structure": structure,
         "identity": identity,

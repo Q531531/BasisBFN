@@ -53,9 +53,11 @@ jobs:
           python scripts/preflight_basisbfn.py --help
           python scripts/profile_basisbfn.py --help
           python scripts/analyze_basisbfn.py --help
+          python scripts/check_dataset.py --help
+          python scripts/create_split_manifest.py --help
       - name: 构建 wheel 并检查公开导入
         run: |
           python -m build --wheel
           python -m pip install --force-reinstall --no-deps dist/*.whl
           cd "$RUNNER_TEMP"
-          python -c "from sgbformer import BasisBFN, BasisBFNLoss; from sgbformer.models import BasisBFNReadout"
+          python -c "from sgbformer import BasisBFN, BasisBFNLoss; from sgbformer.models import BasisBFNReadout; from sgbformer.basisbfn import canonical_basisbfn_config; assert canonical_basisbfn_config()['model']['bfn']['steps'] == 4"

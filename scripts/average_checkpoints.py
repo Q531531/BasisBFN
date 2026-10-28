@@ -1,48 +1,10 @@
 #!/usr/bin/env python3
-"""Arithmetically average several SGBformer checkpoints into one eval file.
+"""Average compatible checkpoints for an explicitly separate diagnostic.
 
-Checkpoint layout (sgbformer/checkpoint.py:104-127)
----------------------------------------------------
-``save_checkpoint`` writes ``format_version: 2`` payloads whose keys are
-``model`` (the full ``state_dict`` minus a frozen ``semantic_encoder``),
-``omitted_state_keys``, ``config``, ``epoch``, ``global_step``,
-``best_psnr``, ``best_lpips``, ``frozen_parameters_excluded`` and, when
-available, ``optimizer`` / ``scheduler`` / ``ema`` / ``scaler`` /
-``rng_states``. The EMA payload is ``{"decay", "warmup_updates", "updates",
-"shadow"}`` (sgbformer/ema.py:48-57) and ``shadow`` only tracks trainable
-parameters, which is why ``--weights ema`` reproduces exactly what
-``load_checkpoint(..., use_ema=True)`` does: start from ``model`` and then
-overwrite it with ``ema["shadow"]`` (sgbformer/checkpoint.py:146-148).
-
-Which files can be averaged
----------------------------
-``train.py`` already writes per-epoch snapshots:
-``output_dir/epoch_{epoch+1:04d}.pt`` whenever ``(epoch + 1) %
-save_interval == 0`` (train.py:1010-1024), in addition to ``latest.pt``
-(train.py:996), ``best_psnr.pt`` (train.py:1026) and ``best_lpips.pt``
-(train.py:1037). ``configs/experiments/ssr_bfn_fullft_v26.yaml`` sets
-``save_interval: 1``, so every epoch of the v26 main run leaves a snapshot
-and no manual copying is required::
-
-    python scripts/average_checkpoints.py \
-      --inputs runs/fullft_v26/main/epoch_0026.pt \
-               runs/fullft_v26/main/epoch_0027.pt \
-               runs/fullft_v26/main/epoch_0028.pt \
-               runs/fullft_v26/main/epoch_0029.pt \
-               runs/fullft_v26/main/epoch_0030.pt \
-      --weights ema --output runs/fullft_v26/main/avg_last5_ema.pt
-
-If a run is ever launched with a coarser ``save_interval`` (or the snapshots
-are pruned for disk space), take the snapshots by hand during training
-instead of editing train.py::
-
-    mkdir -p runs/fullft_v26/main/snapshots
-    cp runs/fullft_v26/main/latest.pt \
-       runs/fullft_v26/main/snapshots/epoch_$(printf '%02d' "$EPOCH").pt
-
-The output keeps the first input's metadata, drops optimizer/EMA/RNG state
-(an averaged model cannot be resumed) and records ``averaged_from``, so it
-can be passed straight to ``evaluate.py --checkpoint``.
+EMA averaging overlays trainable EMA weights on the complete model state.
+The output records its inputs and drops optimizer, EMA and RNG state, so it
+cannot resume training. Averaged checkpoints are not eligible for the fixed
+epoch-6 BasisBFN endpoint; use analyze_basisbfn.py for that protocol.
 """
 
 from __future__ import annotations

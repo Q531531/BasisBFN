@@ -8,7 +8,7 @@ cd "$PROJECT_ROOT"
 : "${SSR_REPO:?Set SSR_REPO to the official SSR repository}"
 : "${SSR_CHECKPOINT:?Set SSR_CHECKPOINT to net_g_best.pth}"
 
-CONFIG="${1:-configs/ssr_bfn_5090.yaml}"
+CONFIG="${1:-configs/experiments/basisbfn_b4g.yaml}"
 OUTPUT_DIR="${2:-results/ssr_official}"
 mkdir -p "$OUTPUT_DIR"
 

@@ -19,18 +19,18 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from sgbformer.config import load_config
 from sgbformer.ema import ExponentialMovingAverage
-from sgbformer.losses import SGBFormerLoss
+from sgbformer.losses import BasisBFNLoss
 from sgbformer.models import CoefficientStateBasisReadout, build_model
-from sgbformer.protocol import implementation_fingerprint, sha256_file
+from sgbformer.protocol import implementation_fingerprint, resolved_config_sha256, sha256_file
 from sgbformer.training import clip_training_gradients
 from sgbformer.utils import parameter_count, seed_everything
-from sgbformer.v27 import resolved_config_sha256
 from sgbformer.basisbfn import (
     BASISBFN_EXPECTED_TRAINABLE_PARAMETERS,
     BASISBFN_EXPECTED_TRAIN_PAIRS,
     BASISBFN_PEAK_MEMORY_GATE_MB,
     BASISBFN_PROFILE_STEPS,
     BASISBFN_PROTOCOL,
+    load_verified_preflight,
     validate_basisbfn_config,
 )
 from train import build_dataset, build_optimizer
@@ -48,35 +48,6 @@ def parse_args() -> argparse.Namespace:
 def synchronize(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
-
-
-def load_verified_preflight(
-    path: Path,
-    *,
-    config_path: Path,
-    config: dict,
-    arm: str,
-) -> dict:
-    report = json.loads(path.read_text(encoding="utf-8"))
-    if (
-        report.get("protocol") != BASISBFN_PROTOCOL
-        or report.get("arm") != arm
-        or report.get("status") != "passed"
-    ):
-        raise RuntimeError(
-            "Preflight is not a passed artifact for this coefficient arm"
-        )
-    recorded = report.get("config", {})
-    if recorded.get("source_sha256") != sha256_file(config_path):
-        raise RuntimeError("Coefficient preflight source config changed")
-    if recorded.get("resolved_sha256") != resolved_config_sha256(config):
-        raise RuntimeError("Coefficient preflight resolved config changed")
-    if (
-        report.get("implementation", {}).get("sha256")
-        != implementation_fingerprint()["sha256"]
-    ):
-        raise RuntimeError("Implementation changed after coefficient preflight")
-    return report
 
 
 def coefficient_readout(model: torch.nn.Module) -> CoefficientStateBasisReadout:
@@ -104,6 +75,8 @@ def main() -> None:
     device = torch.device(args.device)
     if device.type != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("Coefficient throughput profiling requires CUDA")
+    if torch.cuda.get_device_name(device) != preflight["device"]:
+        raise RuntimeError("Profiling GPU differs from the BasisBFN preflight")
 
     experiment_seed = int(config["seed"])
     seed_everything(experiment_seed)
@@ -150,7 +123,7 @@ def main() -> None:
     optimizer = build_optimizer(model, training)
     if len(optimizer.param_groups) != 1:
         raise RuntimeError("Coefficient profile requires one optimizer group")
-    criterion = SGBFormerLoss(**config["loss"]).to(device)
+    criterion = BasisBFNLoss(**config["loss"]).to(device)
     ema = ExponentialMovingAverage(
         model,
         decay=float(training["ema_decay"]),
@@ -276,7 +249,7 @@ def main() -> None:
     if minimum_precision <= 1:
         raise RuntimeError("Coefficient posterior precision did not increase")
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "protocol": BASISBFN_PROTOCOL,
         "arm": arm,
         "status": "passed",
@@ -300,6 +273,7 @@ def main() -> None:
         "peak_memory_allocated_mb": peak_memory_allocated_mb,
         "peak_memory_gate_mb": BASISBFN_PEAK_MEMORY_GATE_MB,
         "device": torch.cuda.get_device_name(device),
+        "device_type": device.type,
         "torch_version": torch.__version__,
         "trainable_parameters": parameter_count(model),
         "receiver_calls_per_image": 1,

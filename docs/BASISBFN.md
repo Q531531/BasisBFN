@@ -1,205 +1,141 @@
-# BasisBFN: Bayesian Residual Refinement with Image-Dependent Bases for Adverse Weather Image Restoration
+# BasisBFN 方法与实验协议
 
-![BasisBFN architecture](assets/basisbfn_architecture.png)
+BasisBFN 的完整名称为 **Bayesian Residual Refinement with Image-Dependent
+Bases for Adverse Weather Image Restoration**。主模型是 `B4-G`，在冻结的
+SSR 上进行系数空间的贝叶斯残差精修。
 
-## 1. Scope
+## 模型与训练目标
 
-BasisBFN attaches a compact Bayesian residual refiner to a frozen SSR
-restoration backbone. It moves the probabilistic state from RGB residual
-pixels to four signed spatial coefficient maps over image-dependent RGB bases.
-The main paper model is the four-step gated Bayesian arm, B4-G.
-
-The implementation does not access official test data and does not start
-training. Every arm remains launch-locked until its own preflight and 200-step
-CUDA profile pass.
-
-## 2. Architecture
-
-For one receiver feature map `h`, the readout computes the basis exactly once:
+SSR 产生基础复原图像和 48 通道特征。条件 U-Net 将 61 通道条件输入映射为
+16 通道共享上下文 `h`。readout 一次构造四个图像依赖的 RGB 基底：
 
 ```text
-basis = Conv2d(SiLU(GroupNorm(h)))          # [B, 4, 3, H, W]
-mu_0 = 0                                   # [B, 4, H, W]
+basis = Conv2d(SiLU(GroupNorm(h)))       # [B, 4, 3, H, W]
+mu_0 = 0                               # [B, 4, H, W]
 rho_0 = 1
 ```
 
-At each of four coefficient-state steps, a shared observer receives:
-
-```text
-[h, mu_i, log(rho_i), time_i]
-```
-
-It predicts a bounded coefficient observation `y_i` and an adaptive accuracy.
-The two matched update rules are:
+共享 observer 每步接收 `[h, mu_i, log(rho_i), time_i]`，预测有界系数观测
+`y_i` 和自适应精度 `alpha_i`。四步更新使用以下两种规则：
 
 ```text
 rho_next = rho + alpha
-
 Bayesian:      mu_next = (rho * mu + alpha * y) / rho_next
 Deterministic: mu_next = mu + (alpha / rho_next) * y
 ```
 
-During training, the normalized target RGB residual is projected onto the
-current basis with a ridge-stabilized minimum-norm solve. A random discrete
-time is sampled, the Gaussian sender produces a noisy coefficient belief, and
-the shared observer predicts the clean coefficient target. Both D and B use
-the same discrete BFN objective from Eq. (15) with weight `0.00004`; this keeps the training
-signal matched while isolating the state-update equation.
+训练时，目标残差先除以 `residual_scale=0.2`，再通过停止梯度的 ridge
+投影求出系数目标，ridge 为 `1e-3`。随机采样一个离散时间，Gaussian
+sender 生成带噪系数状态，observer 预测干净系数目标。两种更新规则使用
+同一训练目标。
 
-The final coefficient maps are `tanh(mu_4)`. The residual is:
+当前实现的损失口径为：
 
 ```text
-correction = gate * sum_k(basis_k * tanh(mu_4,k)) / sqrt(4)
+T = 4
+discrete_loss = (T / 2) * alpha_step * mean((target_coeff - prediction)^2)
+bfn_training_loss = discrete_loss / T
+total_loss = MSE(restored, target) + 4e-5 * bfn_training_loss
 ```
 
-The optional spatial gate is explicitly posterior-conditioned:
+`bfn.py` 的 `discrete_loss` 包含 `T` 采样补偿；`coefficient_state.py` 的
+`bfn_training_loss` 显式除以 `T`。因此 `4e-5` 是配置对模型输出的
+`bfn_loss` 张量的权重。该链路没有再乘 `residual_scale²`。复查公式时应
+同时检查这两层，不能混用其它损失定义的权重。
+
+最终校正与输出为：
 
 ```text
 gate = sigmoid(Conv([h, mu_4, log(rho_4)]))
+correction = gate * sum_k(basis_k * tanh(mu_4,k)) / sqrt(4)
+restored = clamp(frozen_ssr_output + 0.2 * correction, 0, 1)
 ```
 
-The observer output is zero initialized. The gate projection is also zero
-initialized, giving a neutral probability of `0.5`. Since all initial
-coefficients are exactly zero, every arm is exactly the frozen SSR mapping at
-initialization while preserving a live gradient into the observer.
+observer 输出投影零初始化；gate 输出投影也零初始化，初始概率为 `0.5`。
+由于系数初始为零，四组配置最初都保持冻结 SSR 映射，第一次反向传播可以
+到达 observer。一次优化后，梯度继续到达基底、U-Net 和启用的 gate。
 
-## 3. Controlled Matrix
+## 四组受控消融
 
-| Arm | Coefficient update | Posterior gate |
+| 配置 | 系数更新 | 后验门控 |
 | --- | --- | --- |
-| D4 | deterministic | off |
-| D4-G | deterministic | on |
-| B4 | Bayesian | off |
-| B4-G | Bayesian | on |
+| `basisbfn_d4.yaml` | 确定性加法 | 关闭 |
+| `basisbfn_d4g.yaml` | 确定性加法 | 开启 |
+| `basisbfn_b4.yaml` | 贝叶斯融合 | 关闭 |
+| `basisbfn_b4g.yaml` | 贝叶斯融合 | 开启 |
 
-All four arms instantiate the gate parameters and use the same coefficient
-sender/receiver objective, including gate-off controls. They therefore have
-identical parameter names and exactly `624,217` trainable parameters. D/B
-changes only a parameter-free state-update equation; `-G` changes only whether
-the already-present gate output is applied.
+四组均实例化同样的 gate 参数，具有相同的参数名称和 **624,217** 个可训练
+参数。关闭 gate 时只跳过应用，不删除其参数。每张图像调用一次 SSR、
+一次 U-Net、一次基底生成和四次系数 observer；训练额外调用一次随机时间
+observer。外层 RGB 更新参数 `model.bfn.update_mode` 保持 `deterministic`，
+实际系数规则由 `coefficient_state_readout.update_mode` 决定。
 
-The legacy outer `model.bfn.update_mode` remains `deterministic` in every arm
-because that RGB-state path is bypassed. The authoritative runtime banner is
-`coefficient_bfn`, which records `steps=4`, the coefficient update mode,
-discrete-BFN training objective, BFN loss weight, and gate state.
-
-Per image:
-
-- frozen SSR calls: `1`;
-- receiver calls: `1`;
-- shared basis evaluations: `1`;
-- coefficient observer calls/state updates: `4`;
-- training-only random-time BFN observer calls: `1`;
-- terminal RGB receiver call: `0`.
-
-## 4. Configs
+配置继承只有当前方法的公共契约和 arm 覆盖：
 
 ```text
-configs/experiments/basisbfn_d4.yaml
-configs/experiments/basisbfn_d4g.yaml
-configs/experiments/basisbfn_b4.yaml
-configs/experiments/basisbfn_b4g.yaml
+sgbformer/configs/basisbfn.yaml
+  → configs/experiments/_basisbfn_common.yaml
+    → configs/experiments/basisbfn_{d4,d4g,b4,b4g}.yaml
+      → 可选的 arm/seed 生成配置
 ```
 
-The common non-launchable base is:
+公共契约随 wheel 分发；协议检查不依赖旧实验版本或旧参考模型。
+`sgbformer` 导入命名空间与通用模型组件保留，便于加载已有模型状态。
 
-```text
-configs/experiments/_basisbfn_common.yaml
-```
+## 预检、profile 与训练
 
-The manuscript reports independent runs with seeds `42`, `43`, `44`, and
-`45`. Generate non-overlapping arm/seed overlays with
-`scripts/make_basisbfn_config.py`.
+完整命令见 [README](../README.md)。每个 arm 和模型种子
+`42/43/44/45` 使用各自的配置、产物和运行目录，共用固定数据划分。
 
-## 5. Preflight And Profile
+真实 CUDA preflight 检查 17,166 对训练数据、903 对验证数据、八张图的
+初始化恒等、DCT 正交初始化、参数冻结、精度增长、门控范围与梯度可达性。
+200-step CUDA profile 检查训练调用次数，并记录吞吐与显存，显存上限为
+2 GiB。它不计算验证质量指标。
 
-Run the preflight separately for every arm. It also loads and audits the full
-2x2 matrix:
+启动检查绑定源配置与解析配置、当前代码、SSR 架构文件与权重 SHA-256、
+两份清单的 SHA-256 和数量、CUDA GPU 名称与 profile 批量设置。
+改动任一绑定项后应重新生成真实预检与 profile。CPU 单测中的合成报告
+只验证拒绝逻辑，不是正式 CUDA 产物。
+
+## 固定端点评测与分析
+
+正式端点为 **epoch-6 EMA**。epoch 1–5、`best_psnr.pt`、平均权重和
+self-ensemble 结果仅用于另行标注的诊断。固定端点评测为确定性、整图、
+Y 通道、crop border 0、无 self-ensemble。
+
+先对同一验证清单生成冻结 SSR 基线：
 
 ```bash
-python3 scripts/preflight_basisbfn.py \
-  --config configs/experiments/basisbfn_b4g.yaml \
-  --reference-c0 configs/experiments/ssr_residual_v27_c0_proxy.yaml \
-  --matrix-config-dir configs/experiments \
-  --output-dir runs/basisbfn/preflight \
-  --device cuda
-```
-
-The preflight checks exact F0 identity on eight seeded dev images, DCT basis
-orthogonality, posterior precision growth, gate bounds, one basis/four observer
-calls, an active finite coefficient BFN loss, frozen SSR state, parameter
-ownership, and first/second optimizer-step gradient reachability.
-
-After reviewing the passed preflight:
-
-```bash
-python3 scripts/profile_basisbfn.py \
-  --config configs/experiments/basisbfn_b4g.yaml \
-  --preflight runs/basisbfn/preflight/preflight_b4-g.json \
-  --output runs/basisbfn/profiles/B4-G.json \
-  --device cuda
-```
-
-The profile executes exactly 200 optimizer steps and records throughput, peak
-allocated CUDA memory, coefficient activity, posterior precision, and gate
-activity. It computes no validation quality metric. Peak allocated memory must
-remain at or below 2 GiB.
-
-## 6. Training And Evaluation
-
-Only after the matching preflight and profile artifacts have been reviewed:
-
-```bash
-python3 -u train.py \
-  --config configs/experiments/basisbfn_b4g.yaml \
-  --device cuda
-```
-
-Epochs 1-5 are diagnostic. The formal endpoint is EMA `epoch_0006.pt`.
-Evaluation is deterministic, full-image, Y-channel, and uses no self-ensemble:
-
-```bash
-python3 evaluate.py \
-  --checkpoint runs/basisbfn/b4-g/epoch_0006.pt \
+python3 evaluate_foundation.py \
+  --config configs/generated/basisbfn_b4g_seed42.yaml \
   --input-dir "$SGB_DATA_ROOT/input" \
   --target-dir "$SGB_DATA_ROOT/gt" \
   --pairs-file "$SGB_DATA_ROOT/val_pairs.tsv" \
-  --device cuda \
-  --test-y-channel \
-  --category-pattern 'snow=.*\.jpe?g' \
-  --category-pattern 'outdoor_rain=im_\d+_s\d+_a0[456]\.png' \
-  --category-pattern 'raindrop=\d+_rain\.png' \
-  --json runs/basisbfn/analysis/b4-g_epoch6/evaluation.json
+  --device cuda --test-y-channel \
+  --json results/f0_dev.json
 ```
 
-## 7. Fixed Matrix Analysis
-
-After all four fixed endpoints are available:
+再按 README 的 `evaluate.py` 命令分别生成四组 epoch-6 JSON。同一模型种子的
+矩阵分析示例：
 
 ```bash
 python3 scripts/analyze_basisbfn.py \
-  --baseline runs/residual_bfn_v27_exploratory/analysis/c0doubleprime_epoch3/f0_reconstructed_from_structural.json \
-  --checkpoint D4=runs/basisbfn/d4/epoch_0006.pt \
-  --checkpoint D4-G=runs/basisbfn/d4-g/epoch_0006.pt \
-  --checkpoint B4=runs/basisbfn/b4/epoch_0006.pt \
-  --checkpoint B4-G=runs/basisbfn/b4-g/epoch_0006.pt \
-  --candidate D4=runs/basisbfn/analysis/d4_epoch6/evaluation.json \
-  --candidate D4-G=runs/basisbfn/analysis/d4-g_epoch6/evaluation.json \
-  --candidate B4=runs/basisbfn/analysis/b4_epoch6/evaluation.json \
-  --candidate B4-G=runs/basisbfn/analysis/b4-g_epoch6/evaluation.json \
+  --baseline results/f0_dev.json \
+  --checkpoint D4=runs/basisbfn/d4/seed_42/epoch_0006.pt \
+  --checkpoint D4-G=runs/basisbfn/d4-g/seed_42/epoch_0006.pt \
+  --checkpoint B4=runs/basisbfn/b4/seed_42/epoch_0006.pt \
+  --checkpoint B4-G=runs/basisbfn/b4-g/seed_42/epoch_0006.pt \
+  --candidate D4=results/d4_seed42.json \
+  --candidate D4-G=results/d4g_seed42.json \
+  --candidate B4=results/b4_seed42.json \
+  --candidate B4-G=results/b4g_seed42.json \
   --pairs-file "$SGB_DATA_ROOT/val_pairs.tsv" \
-  --output-dir runs/basisbfn/analysis/matrix_epoch6 \
-  --bootstrap-samples 10000 \
-  --seed 42
+  --output-dir results/matrix_seed42 \
+  --bootstrap-samples 10000 --seed 42
 ```
 
-The analyzer verifies every checkpoint/evaluation hash and reports:
-
-- every arm versus F0;
-- B4 versus D4;
-- B4-G versus D4-G;
-- D4-G versus D4;
-- B4-G versus B4;
-- the macro PSNR Bayesian-by-gate interaction.
-
-It does not scan checkpoints or replace the fixed endpoint.
+分析器核对 checkpoint 与评测哈希、EMA、epoch 和模型调用协议，输出四组
+对 F0 的差异、D/B 效应、gate 效应及交互。按天气类别分别 bootstrap，
+Snow／Outdoor-Rain／RainDrop 权重为 `0.50/0.25/0.25`。图像 bootstrap
+不包含模型训练种子方差。论文结果与公开证据范围见
+[REPRODUCIBILITY](REPRODUCIBILITY.md)。

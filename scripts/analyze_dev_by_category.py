@@ -1,79 +1,14 @@
 #!/usr/bin/env python3
-r"""Split two matched dev evaluations by weather category (zero GPU cost).
+r"""Compare matched dev evaluations by weather category without GPU work.
 
-Why this script exists
-----------------------
-The v26 pilot lost -0.083995 dB PSNR against the foundation on the 903-pair
-dev split (【已测量】user-reported paired bootstrap, 10000 samples, seed 42),
-but v26 trains with ``sampling.mode: category_balanced`` at the official macro
-mixture Snow 0.50 / Outdoor-Rain 0.25 / RainDrop 0.25
-(``configs/experiments/ssr_bfn_fullft_v26.yaml:241-250``) while dev is a 5%
-*natural-distribution* random subset (``scripts/create_split_manifest.py``).
-A natural-distribution dev mean therefore mixes two effects: real quality
-change, and the deliberate re-weighting of the training mixture. This script
-separates them by reporting per-category deltas plus a macro-weighted delta,
-using only the two JSON artefacts that already exist on disk.
+Reports pooled and category-weighted deltas, with paired image bootstrap
+within each category. Snow, Outdoor-Rain and RainDrop use weights 0.50,
+0.25 and 0.25. These are evaluation weights; training uses natural shuffle.
 
-Relationship to ``scripts/compare_allweather.py``
--------------------------------------------------
-* ``compare_allweather.py`` takes two *directories* containing the four
-  official test JSONs (``snow100k_s`` / ``snow100k_l`` / ``outdoor_rain`` /
-  ``raindrop``) and calls ``sgbformer.comparison.paired_comparison``, whose
-  ``macro`` block gives every *dataset* the same weight ``1 / len(groups)``
-  (【代码事实】``sgbformer/comparison.py:286-297``), i.e. 0.25 each over four
-  sets.
-* This script takes two *single* JSONs produced on one image set (the 903-pair
-  dev split) and derives the categories from the filenames, because a dev JSON
-  has no dataset structure at all.
-* ``natural_mean`` is **delegated** to
-  ``sgbformer.comparison.paired_image_comparison``
-  (【代码事实】``sgbformer/comparison.py:170-234``), so the pooled delta,
-  bootstrap CI95 and ``improved_images`` use exactly the same statistical
-  convention (and the same protocol compatibility gate) as every other
-  ``scripts/decide_*.py`` in this repository.
-* ``macro_weighted`` is implemented locally because no existing helper accepts
-  user-supplied category weights. It follows the *stratified* pattern of
-  ``comparison.py:286-297``: images are resampled **within** each category and
-  the per-category means are then combined with the macro weights, never by
-  pooling the three categories into one resampling urn.
-
-Filename classification (important, verified against the code)
---------------------------------------------------------------
-【代码事实】``sgbformer/data/paired.py:124`` stores
-``name = str(Path(fields[0]).with_suffix(""))`` and
-``paired.py:75-92`` uses ``_relative_stem``: the per-image key written into
-every evaluation JSON (``evaluate.py:452-456``,
-``evaluate_foundation.py:89-100``) is an **extension-less relative stem**.
-The repository category regexes
-(``configs/experiments/ssr_bfn_fullft_v26.yaml:243-246``,
-``evaluate.py:28-58``) all end in an explicit extension, so matching them
-against ``images[].name`` verbatim would match nothing. This script therefore
-tries, in order:
-
-1. the basename exactly as stored;
-2. if (and only if) it carries no image extension, the basename with
-   ``.png``, then ``.jpg``, then ``.jpeg`` appended, stopping at the first
-   suffix that yields exactly one match.
-
-The ``.png``-before-``.jpg`` order is what makes the recovery unambiguous for
-All-Weather names: ``im_0001_s80_a04`` and ``123_rain`` resolve on ``.png``,
-while Snow100K stems only resolve on ``.jpg``/``.jpeg``. A name that matches
-two categories within one attempt, or no category after all attempts, is
-reported as an error - never silently dropped.
-
-Honest caveat about the recovery heuristic: the ``snow`` regex ``.*\.jpe?g``
-is a *catch-all* once an extension is restored, so under recovery any stem
-that is not Outdoor-Rain/RainDrop shaped lands in ``snow``. That matches the
-real All-Weather layout (Snow100K inputs are ``.jpg``, the other two are
-``.png``) but it means a genuinely foreign filename cannot be detected. Pass
-``--pairs-file ${SGB_DATA_ROOT}/val_pairs.tsv`` to reconstruct the *true*
-filenames (parsed exactly like ``sgbformer/data/paired.py:96-126``); the
-classification is then exact and unknown files really do raise. The report
-records which mode was used in ``classification.source``.
-
-If the JSONs already carry per-image ``category`` fields (``evaluate.py`` run
-with ``--category-pattern``) they are cross-checked against the regex result
-and used as a fallback when regex classification fails.
+Pass --pairs-file to recover exact filenames from extension-less image
+names. Without a manifest, suffix recovery tries .png, .jpg and .jpeg; a
+foreign stem may consequently be classified as snow. Ambiguous matches and
+disagreements with recorded per-image categories raise errors.
 """
 
 from __future__ import annotations
@@ -90,17 +25,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sgbformer.comparison import paired_image_comparison
 
-# Same three regexes as configs/experiments/ssr_bfn_fullft_v26.yaml:243-246
-# (sampling.category_patterns) and model.latent_bfn.category_patterns
-# (yaml:131-134). evaluate.py:38 compiles them with re.IGNORECASE and
-# evaluate.py:51 applies re.fullmatch, so both are mirrored here.
+# All-Weather filename patterns, also used by evaluate.py.
 DEFAULT_CATEGORY_PATTERNS: dict[str, str] = {
     "snow": r".*\.jpe?g",
     "outdoor_rain": r"im_\d+_s\d+_a0[456]\.png",
     "raindrop": r"\d+_rain\.png",
 }
-# Official four-set macro collapsed onto the three dev categories, identical to
-# training's sampling.target_fractions (yaml:247-250).
+# Official four-set macro collapsed onto three dev weather categories.
 DEFAULT_CATEGORY_WEIGHTS: dict[str, float] = {
     "snow": 0.50,
     "outdoor_rain": 0.25,
@@ -108,9 +39,6 @@ DEFAULT_CATEGORY_WEIGHTS: dict[str, float] = {
 }
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
 SUFFIX_RECOVERY_ORDER = (".png", ".jpg", ".jpeg")
-# 【已测量】user-reported pilot-vs-foundation dev comparison on 903 pairs
-# (10000 bootstrap samples, seed 42).
-REPORTED_NATURAL_DELTA_PSNR = -0.083995
 NAME_KEYS = ("name", "image", "path", "input_path", "file", "filename")
 SUPPORTED_METRICS = ("psnr", "ssim", "lpips")
 SMALL_CATEGORY_THRESHOLD = 60
@@ -475,7 +403,7 @@ def analyze_dev_by_category(
     bootstrap_samples: int = 10000,
     seed: int = 42,
     small_category_threshold: int = SMALL_CATEGORY_THRESHOLD,
-    reported_delta_psnr: float | None = REPORTED_NATURAL_DELTA_PSNR,
+    reported_delta_psnr: float | None = None,
     reported_delta_tolerance: float = 1e-4,
     allow_protocol_mismatch: bool = False,
     suffix_recovery: bool = True,
@@ -692,7 +620,7 @@ def analyze_dev_by_category(
                 f"{observed:+.6f} differs from the reported "
                 f"{float(reported_delta_psnr):+.6f} by {difference:.6f} > "
                 f"{float(reported_delta_tolerance):g}: either these are not the "
-                "pilot-vs-foundation dev JSONs, or the artefacts changed"
+                "expected dev JSONs, or the artefacts changed"
             )
 
     weights = dict(category_weights or DEFAULT_CATEGORY_WEIGHTS)
@@ -795,10 +723,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--reported-delta-psnr",
         type=float,
-        default=REPORTED_NATURAL_DELTA_PSNR,
+        default=None,
         help=(
             "Natural-mean ΔPSNR that the script should reproduce as a self-check "
-            "(default is the measured pilot value -0.083995)."
+            "(disabled unless an expected delta is explicitly provided)."
         ),
     )
     parser.add_argument(
@@ -924,10 +852,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(format_report(report))
     check = report["natural_mean"].get("reproduces_reported_delta")
-    if args.require_reported_delta and check is not None and not check["matches"]:
+    if args.require_reported_delta and (check is None or not check["matches"]):
         print(
-            "FAIL: --require-reported-delta was set and the self-check did not "
-            "reproduce",
+            "FAIL: --require-reported-delta requires an explicit expected delta "
+            "and a matching self-check",
             file=sys.stderr,
         )
         return 2

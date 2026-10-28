@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sgbformer.config import load_config
 from sgbformer.data import PairedImageDataset
@@ -11,7 +15,7 @@ from sgbformer.data import PairedImageDataset
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/sgbformer_5090.yaml")
+    parser.add_argument("--config", required=True)
     parser.add_argument("--samples", type=int, default=32)
     args = parser.parse_args()
     config = load_config(args.config)

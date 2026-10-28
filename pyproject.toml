@@ -28,6 +28,9 @@ all = [
 [tool.setuptools.packages.find]
 include = ["sgbformer*"]
 
+[tool.setuptools.package-data]
+sgbformer = ["configs/*.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

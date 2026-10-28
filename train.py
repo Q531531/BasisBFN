@@ -34,11 +34,7 @@ from sgbformer.ema import ExponentialMovingAverage
 from sgbformer.losses import BasisBFNLoss
 from sgbformer.metrics import LPIPSMetric, psnr, ssim
 from sgbformer.models import build_model
-from sgbformer.protocol import (
-    loss_term_manifest,
-    validate_budget_lock,
-    validate_frozen_main_contract,
-)
+from sgbformer.protocol import loss_term_manifest
 from sgbformer.training import (
     build_scheduler,
     clip_training_gradients,
@@ -47,14 +43,7 @@ from sgbformer.training import (
     stage_loss_config,
     validate_resume_config,
 )
-from sgbformer.tripwire import require_tripwire_resume, write_tripwire_status
 from sgbformer.utils import parameter_count, resolve_device, seed_everything
-from sgbformer.v27 import validate_v27_config, validate_v27_launch_artifacts
-from sgbformer.v28 import (
-    V28_PROTOCOL,
-    validate_v28_launch_artifacts,
-    validate_v28_r0_config,
-)
 from sgbformer.basisbfn import (
     BASISBFN_PROTOCOL,
     validate_basisbfn_config,
@@ -333,35 +322,19 @@ def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     protocol_name = config.get("protocol", {}).get("name")
-    v27_launch = None
-    v28_launch = None
-    if protocol_name == "frozen_main_db":
-        validate_frozen_main_contract(config)
-    elif protocol_name == "residual_bfn_v27":
-        validate_v27_config(config)
-        v27_launch = validate_v27_launch_artifacts(args.config, config)
-    elif protocol_name == V28_PROTOCOL:
-        validate_v28_r0_config(config)
-        v28_launch = validate_v28_launch_artifacts(args.config, config)
-    elif protocol_name == BASISBFN_PROTOCOL:
+    locked_launch = None
+    if protocol_name is not None and protocol_name != BASISBFN_PROTOCOL:
+        raise ValueError(f"Unsupported experiment protocol: {protocol_name!r}")
+    if protocol_name == BASISBFN_PROTOCOL:
         validate_basisbfn_config(config)
-        v28_launch = validate_basisbfn_launch_artifacts(
+        locked_launch = validate_basisbfn_launch_artifacts(
             args.config,
             config,
         )
-    budget_manifest = validate_budget_lock(args.config, config)
     if args.seed is not None:
-        if protocol_name in {
-            "residual_bfn_v27",
-            V28_PROTOCOL,
-            BASISBFN_PROTOCOL,
-        }:
+        if protocol_name == BASISBFN_PROTOCOL:
             raise RuntimeError(
                 f"The {protocol_name} protocol does not permit --seed overrides"
-            )
-        if config.get("training", {}).get("require_budget_lock", False):
-            raise RuntimeError(
-                "A locked protocol does not permit --seed overrides"
             )
         config["seed"] = args.seed
         config["training"]["output_dir"] = (
@@ -369,11 +342,10 @@ def main() -> None:
         )
     device, rank, world_size = setup_distributed(args.device)
     is_main = rank == 0
-    locked_launch = v28_launch or v27_launch
     if locked_launch is not None:
         if world_size != 1 or device.type != "cuda":
             raise RuntimeError(
-                "Registered residual profiles are single-GPU CUDA measurements"
+                "BasisBFN profiles are single-GPU CUDA measurements"
             )
         profiled_device = locked_launch.get("profile_device")
         current_device = torch.cuda.get_device_name(device)
@@ -382,24 +354,11 @@ def main() -> None:
                 "Training GPU differs from the registered throughput profile: "
                 f"{current_device!r} != {profiled_device!r}"
             )
-    if budget_manifest is not None:
-        if world_size != 1 or device.type != "cuda":
-            raise RuntimeError(
-                "Frozen-main profiles are single-GPU CUDA measurements"
-            )
-        arm = str(config["training"]["budget_arm"])
-        profiled_device = budget_manifest["profiles"][arm].get("device")
-        current_device = torch.cuda.get_device_name(device)
-        if profiled_device is not None and current_device != profiled_device:
-            raise RuntimeError(
-                "Training GPU differs from the frozen throughput profile: "
-                f"{current_device!r} != {profiled_device!r}"
-            )
     seed = int(config.get("seed", 42)) + rank
     seed_everything(seed)
 
     train_config = config["training"]
-    output_dir = Path(train_config.get("output_dir", "runs/sgbformer"))
+    output_dir = Path(train_config.get("output_dir", "runs/basisbfn"))
     if not args.resume and (output_dir / "metrics.jsonl").exists():
         raise FileExistsError(
             f"{output_dir} already contains a run; resume it or use a new output_dir"
@@ -421,12 +380,7 @@ def main() -> None:
         training=True,
         sample_seed=data_seed if reproducible_data else None,
     )
-    if protocol_name in {
-        "frozen_main_db",
-        "residual_bfn_v27",
-        V28_PROTOCOL,
-        BASISBFN_PROTOCOL,
-    }:
+    if protocol_name == BASISBFN_PROTOCOL:
         expected_train = int(config["protocol"]["expected_train_pairs"])
         if len(train_dataset) != expected_train:
             raise RuntimeError(
@@ -509,22 +463,10 @@ def main() -> None:
         raise ValueError(
             "Training loader is empty. Reduce the global batch size or add data."
         )
-    if config.get("protocol", {}).get("name") == "frozen_main_db":
-        optimizer_steps_per_epoch = math.ceil(len(train_loader) / accumulation)
-        if optimizer_steps_per_epoch != 1130:
-            raise RuntimeError(
-                "Frozen-main requires exactly 1130 optimizer steps per epoch"
-            )
-
     val_loader = None
     if is_main and data_config.get("val"):
         val_dataset = build_dataset(data_config["val"], training=False)
-        if protocol_name in {
-            "frozen_main_db",
-            "residual_bfn_v27",
-            V28_PROTOCOL,
-            BASISBFN_PROTOCOL,
-        }:
+        if protocol_name == BASISBFN_PROTOCOL:
             expected_dev = int(config["protocol"]["expected_dev_pairs"])
             if len(val_dataset) != expected_dev:
                 raise RuntimeError(
@@ -606,13 +548,6 @@ def main() -> None:
                     "Resume checkpoint disagrees with existing history; "
                     "use a new output_dir for an earlier checkpoint"
                 )
-        if budget_manifest is not None:
-            require_tripwire_resume(
-                config_path=args.config,
-                config=config,
-                manifest=budget_manifest,
-                start_epoch=start_epoch,
-            )
 
     base_model = model.module if hasattr(model, "module") else model
     if is_main:
@@ -644,29 +579,6 @@ def main() -> None:
                 sort_keys=True,
             )
         )
-        if budget_manifest is not None:
-            print(
-                "budget_lock="
-                + json.dumps(
-                    {
-                        "requested_gpu_hours_per_arm": budget_manifest[
-                            "requested_gpu_hours_per_arm"
-                        ],
-                        "effective_gpu_hours_per_arm": budget_manifest[
-                            "effective_gpu_hours_per_arm"
-                        ],
-                        "hard_gpu_hour_cap_per_arm": budget_manifest[
-                            "hard_gpu_hour_cap_per_arm"
-                        ],
-                        "budget_floor_reached": budget_manifest[
-                            "budget_floor_reached"
-                        ],
-                        "steps_per_epoch": budget_manifest["steps_per_epoch"],
-                        "epochs": budget_manifest["epochs"],
-                    },
-                    sort_keys=True,
-                )
-            )
         print(
             f"refinement_mode={base_model.refinement_mode} "
             f"bfn_steps={base_model.bfn_steps} "
@@ -747,12 +659,7 @@ def main() -> None:
     throughput_started: float | None = None
     throughput_steps = 0
     profiled_seconds_per_step = None
-    if budget_manifest is not None:
-        arm = str(config["training"]["budget_arm"])
-        profiled_seconds_per_step = float(
-            budget_manifest["profiles"][arm]["seconds_per_optimizer_step"]
-        )
-    elif locked_launch is not None:
+    if locked_launch is not None:
         profiled_seconds_per_step = float(
             locked_launch["profile_seconds_per_step"]
         )
@@ -1130,29 +1037,6 @@ def main() -> None:
                     best_psnr=best_psnr,
                     best_lpips=best_lpips,
                 )
-            tripwire = config.get("protocol", {}).get("tripwire")
-            if (
-                budget_manifest is not None
-                and isinstance(tripwire, dict)
-                and tripwire.get("pause_after_epoch") is True
-                and epoch + 1 == int(tripwire["epoch"])
-            ):
-                if validation is None:
-                    raise RuntimeError(
-                        "Epoch-4 tripwire requires a validation result"
-                    )
-                status = write_tripwire_status(
-                    config_path=args.config,
-                    config=config,
-                    validation=validation,
-                    checkpoint_path=output_dir / "latest.pt",
-                )
-                print(
-                    "tripwire_pause="
-                    + json.dumps(status, sort_keys=True)
-                )
-                return
-
     if world_size > 1:
         dist.destroy_process_group()
 

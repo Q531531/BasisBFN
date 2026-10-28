@@ -2,6 +2,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 import copy
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,9 +11,11 @@ from torch.nn import functional as F
 
 from sgbformer.config import load_config
 from sgbformer.models import CoefficientStateBasisReadout, build_model
-from sgbformer.protocol import implementation_fingerprint, sha256_file
+from sgbformer.protocol import (
+    foundation_artifact_fingerprint, implementation_fingerprint,
+    manifest_fingerprints, resolved_config_sha256, sha256_file,
+)
 from sgbformer.utils import parameter_count
-from sgbformer.v27 import resolved_config_sha256
 from sgbformer.basisbfn import (
     BASISBFN_ARMS,
     BASISBFN_EXPECTED_TRAINABLE_PARAMETERS,
@@ -21,7 +24,8 @@ from sgbformer.basisbfn import (
     BASISBFN_PROTOCOL,
     audit_basisbfn_config,
     audit_basisbfn_matrix,
-    canonical_v27_c0_config,
+    canonical_basisbfn_config,
+    load_verified_preflight,
     validate_basisbfn_config,
     validate_basisbfn_launch_artifacts,
 )
@@ -320,11 +324,10 @@ def test_basisbfn_matrix_and_full_model_contract(tmp_path: Path) -> None:
     matrix = audit_basisbfn_matrix(configs)
     assert matrix["arms"] == BASISBFN_ARMS
     assert matrix["parameter_matched"] is True
-    audit = audit_basisbfn_config(configs["B4"], canonical_v27_c0_config())
-    assert audit["behavioral_differences"] == [
-        "loss.bfn_weight",
-        "model.bfn.steps",
-        "model.bfn.coefficient_state_readout",
+    audit = audit_basisbfn_config(configs["B4"])
+    assert audit["controlled_variables"] == [
+        "model.bfn.coefficient_state_readout.update_mode",
+        "model.bfn.coefficient_state_readout.acceptance_gate.enabled",
     ]
 
     parameter_names = None
@@ -418,7 +421,24 @@ def test_basisbfn_accepts_all_four_paper_seeds(tmp_path: Path) -> None:
         validate_basisbfn_config(config)
 
 
-def test_basisbfn_launch_requires_bound_artifacts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("arm", list(BASISBFN_ARMS))
+@pytest.mark.parametrize("seed", [42, 43, 44, 45])
+def test_generator_builds_all_sixteen_valid_arm_seed_configs(tmp_path, monkeypatch, arm, seed):
+    load_configs(tmp_path)
+    module = load_script("make_basisbfn_config.py")
+    path = tmp_path / "generated" / f"{arm}_{seed}.yaml"
+    monkeypatch.setattr(sys, "argv", [
+        "make_basisbfn_config.py", "--arm", arm, "--seed", str(seed), "--output", str(path),
+    ])
+    module.main()
+    config = load_config(path)
+    assert validate_basisbfn_config(config) == arm
+    assert config["seed"] == seed
+    assert config["training"]["output_dir"] == f"runs/basisbfn/{arm.lower()}/seed_{seed}"
+
+
+def launch_fixture(tmp_path: Path):
+    """Synthetic validator fixtures; these are not real CUDA evidence."""
     configs, paths = load_configs(tmp_path)
     config = configs["B4-G"]
     config_path = paths["B4-G"]
@@ -428,7 +448,15 @@ def test_basisbfn_launch_requires_bound_artifacts(tmp_path: Path) -> None:
         preflight_path
     )
     config["training"]["basisbfn_profile_report"] = str(profile_path)
+    data = tmp_path / "data"
+    data.mkdir()
+    for split, count in (("train", 17166), ("val", 903)):
+        (data / f"{split}_pairs.tsv").write_text(
+            "".join(f"{split}/{i}.jpg\t{split}/{i}.jpg\n" for i in range(count)),
+            encoding="utf-8",
+        )
     preflight = {
+        "schema_version": 2,
         "protocol": BASISBFN_PROTOCOL,
         "arm": "B4-G",
         "status": "passed",
@@ -437,9 +465,22 @@ def test_basisbfn_launch_requires_bound_artifacts(tmp_path: Path) -> None:
             "resolved_sha256": resolved_config_sha256(config),
         },
         "implementation": implementation_fingerprint(),
+        "foundation_artifacts": foundation_artifact_fingerprint(config),
+        "manifests": manifest_fingerprints(config),
+        "device_type": "cuda",
+        "device": "synthetic-test-gpu",
+        "structure": {"trainable_parameters": 624217},
+        "identity": {"images": 8, "maximum_absolute_difference": 0.0},
+        "gradients": {"foundation_state_unchanged": True},
+        "scope": {
+            "training_started": False,
+            "quality_metrics_observed": False,
+            "official_test_accessed": False,
+        },
     }
     preflight_path.write_text(json.dumps(preflight), encoding="utf-8")
     profile = {
+        "schema_version": 2,
         "protocol": BASISBFN_PROTOCOL,
         "arm": "B4-G",
         "status": "passed",
@@ -456,18 +497,105 @@ def test_basisbfn_launch_requires_bound_artifacts(tmp_path: Path) -> None:
         "quality_metrics_observed": False,
         "preflight": {"sha256": sha256_file(preflight_path)},
         "implementation": implementation_fingerprint(),
-        "device": "test-device",
+        "device": "synthetic-test-gpu",
+        "device_type": "cuda",
+        "global_batch_size": 16,
+        "micro_batch_size": 2,
+        "micro_batches_per_optimizer_step": 8,
+        "train_pairs": 17166,
+        "update_mode": "bayesian",
+        "acceptance_gate_enabled": True,
+        "sampling": {"mode": "shuffle"},
+        "elapsed_seconds": 200.0,
+        "throughput_images_per_second": 16.0,
         "seconds_per_optimizer_step": 1.0,
         "peak_memory_allocated_mb": BASISBFN_PEAK_MEMORY_GATE_MB,
     }
     profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    return config, config_path, preflight, preflight_path, profile, profile_path
+
+
+def test_basisbfn_launch_requires_bound_artifacts(tmp_path: Path) -> None:
+    config, config_path, _, _, profile, profile_path = launch_fixture(tmp_path)
     launch = validate_basisbfn_launch_artifacts(config_path, config)
     assert launch["arm"] == "B4-G"
 
     profile["basis_evaluations_per_image"] = 2
     profile_path.write_text(json.dumps(profile), encoding="utf-8")
-    with pytest.raises(RuntimeError, match="basis once"):
+    with pytest.raises(RuntimeError, match="basis_evaluations_per_image"):
         validate_basisbfn_launch_artifacts(config_path, config)
+
+
+@pytest.mark.parametrize("artifact", ["architecture", "checkpoint", "train", "dev"])
+def test_launch_and_profiler_reject_changed_external_artifacts(tmp_path, artifact):
+    config, config_path, preflight, preflight_path, _, _ = launch_fixture(tmp_path)
+    section = "foundation_artifacts" if artifact in ("architecture", "checkpoint") else "manifests"
+    path = Path(preflight[section][artifact]["path"])
+    with path.open("ab") as handle:
+        handle.write(b"\n# changed\n")
+    for validator in (
+        lambda: load_verified_preflight(preflight_path, config_path=config_path, config=config, arm="B4-G"),
+        lambda: validate_basisbfn_launch_artifacts(config_path, config),
+    ):
+        with pytest.raises(RuntimeError, match="changed"):
+            validator()
+
+
+@pytest.mark.parametrize("key,value", [
+    ("device_type", "cpu"), ("device", "another-gpu"),
+    ("seconds_per_optimizer_step", float("nan")),
+    ("peak_memory_allocated_mb", -1.0),
+    ("peak_memory_allocated_mb", 2049.0),
+    ("elapsed_seconds", 100.0), ("global_batch_size", 8),
+    ("optimizer_steps", 199), ("coefficient_state_updates_per_image", 3),
+])
+def test_launch_rejects_invalid_profile(tmp_path, key, value):
+    config, config_path, _, _, profile, path = launch_fixture(tmp_path)
+    profile[key] = value
+    path.write_text(json.dumps(profile), encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        validate_basisbfn_launch_artifacts(config_path, config)
+
+
+def test_profiler_rejects_cpu_preflight_and_launch_rejects_missing_reports(tmp_path):
+    config, config_path, report, path, _, _ = launch_fixture(tmp_path)
+    report["device_type"] = "cpu"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="CUDA"):
+        load_verified_preflight(path, config_path=config_path, config=config, arm="B4-G")
+    path.unlink()
+    with pytest.raises(FileNotFoundError):
+        validate_basisbfn_launch_artifacts(config_path, config)
+
+
+@pytest.mark.parametrize("arm", list(BASISBFN_ARMS))
+def test_preflight_helpers_check_actual_gradients_for_each_arm(tmp_path, arm):
+    configs, _ = load_configs(tmp_path)
+    module = load_script("preflight_basisbfn.py")
+    torch.manual_seed(42)
+    model = build_model(configs[arm])
+    structure = module.assert_structure(model, arm)
+    assert structure["trainable_parameters"] == 624217
+    sample = {"degraded": torch.rand(3, 16, 16), "target": torch.rand(3, 16, 16)}
+    identity = module.check_identity(model, [sample] * 8, torch.device("cpu"))
+    assert identity["maximum_absolute_difference"] <= 1e-6
+    gradients = module.check_gradient_path(model, configs[arm], sample, torch.device("cpu"))
+    assert gradients["foundation_state_unchanged"]
+
+
+@pytest.mark.parametrize("section,key,value", [
+    ("loss", "bfn_weight", 0.001),
+    ("training", "learning_rate", 0.0004),
+    ("training", "epochs", 7),
+    ("validation", "test_y_channel", False),
+    ("protocol", "name", "other"),
+])
+def test_independent_contract_rejects_semantic_changes(tmp_path, section, key, value):
+    configs, _ = load_configs(tmp_path)
+    config = configs["B4-G"]
+    config[section][key] = value
+    with pytest.raises(ValueError, match="unregistered"):
+        validate_basisbfn_config(config)
 
 
 def test_basisbfn_analyzer_binds_fixed_endpoint(tmp_path: Path) -> None:
@@ -507,6 +635,7 @@ def test_basisbfn_analyzer_binds_fixed_endpoint(tmp_path: Path) -> None:
             "basis_evaluations_per_trajectory": 1,
             "coefficient_update_mode": "bayesian",
             "coefficient_gate_enabled": True,
+            "bfn_gain": 1.0,
         }
     }
     evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
@@ -517,6 +646,11 @@ def test_basisbfn_analyzer_binds_fixed_endpoint(tmp_path: Path) -> None:
     )
     assert endpoint["checkpoint_epoch"] == 5
 
+    evaluation["protocol"]["bfn_gain"] = 0.0
+    evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
+    with pytest.raises(ValueError, match="bfn_gain"):
+        module.validate_fixed_endpoint("B4-G", checkpoint_path, evaluation_path)
+    evaluation["protocol"]["bfn_gain"] = 1.0
     evaluation["protocol"]["coefficient_state_updates_per_trajectory"] = 3
     evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
     with pytest.raises(ValueError, match="must be 4"):
@@ -525,3 +659,37 @@ def test_basisbfn_analyzer_binds_fixed_endpoint(tmp_path: Path) -> None:
             checkpoint_path,
             evaluation_path,
         )
+
+
+@pytest.mark.parametrize("arm,stochastic,expected", [
+    ("B4-G", True, True), ("B4-G", False, False), ("D4", True, False),
+])
+def test_evaluation_records_coefficient_sampling_protocol(tmp_path, monkeypatch, arm, stochastic, expected):
+    from sgbformer.checkpoint import save_checkpoint
+    from sgbformer.utils import save_image
+    configs, _ = load_configs(tmp_path)
+    config = configs[arm]
+    model = build_model(config)
+    checkpoint = tmp_path / "model.pt"
+    save_checkpoint(checkpoint, model, config=config, epoch=5, global_step=1)
+    save_image(torch.rand(3, 16, 16), tmp_path / "input" / "sample.jpg")
+    save_image(torch.rand(3, 16, 16), tmp_path / "target" / "sample.jpg")
+    output = tmp_path / "evaluation.json"
+    path = Path(__file__).resolve().parents[1] / "evaluate.py"
+    spec = spec_from_file_location("_coefficient_eval_test", path)
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    argv = [
+        "evaluate.py", "--checkpoint", str(checkpoint),
+        "--input-dir", str(tmp_path / "input"),
+        "--target-dir", str(tmp_path / "target"), "--device", "cpu",
+        "--quiet", "--json", str(output),
+    ]
+    if stochastic:
+        argv.append("--stochastic")
+    monkeypatch.setattr(sys, "argv", argv)
+    module.main()
+    report = json.loads(output.read_text())
+    assert report["protocol"]["stochastic"] is expected
+    assert report["protocol"]["experiment_arm"] == arm
+    assert report["protocol"]["coefficient_state_updates_per_trajectory"] == 4
