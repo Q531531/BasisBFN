@@ -1,6 +1,6 @@
 # ICML2026（4433均分3.5）｜BasisBFN
 
-[![自动测试](https://github.com/Q531531/SGBformer-Spectral-Gated-Bayesian-Flow-Network-Enhanced-Transformer/actions/workflows/ci.yml/badge.svg)](https://github.com/Q531531/SGBformer-Spectral-Gated-Bayesian-Flow-Network-Enhanced-Transformer/actions/workflows/ci.yml)
+[![自动测试](https://github.com/Q531531/BasisBFN/actions/workflows/ci.yml/badge.svg)](https://github.com/Q531531/BasisBFN/actions/workflows/ci.yml)
 
 **面向恶劣天气图像复原的图像依赖基底贝叶斯残差精修**
 
@@ -36,9 +36,12 @@ BasisBFN 在冻结的 SSR 复原主干上添加轻量精修模块：一次生成
 
 ## 快速验证：无需数据集和权重
 
-从仓库根目录执行：
+下载仓库后，从仓库根目录执行：
 
 ```bash
+git clone https://github.com/Q531531/BasisBFN.git
+cd BasisBFN
+
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -e ".[dev]"
