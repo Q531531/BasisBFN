@@ -338,7 +338,18 @@ class CategoryRoutedReadout(nn.Module):
             raise RuntimeError("Category-routed readout has no heads")
         self.last_ungated_mixture = mixture.detach()
         if self.acceptance_gate is not None:
-            acceptance = self.acceptance_gate(pooled).clamp(0.0, 1.0)
+            raw_acceptance = self.acceptance_gate(pooled)
+            # Keep the historical unit gradient at both boundaries explicitly:
+            # a zero-initialized gate must be able to leave the identity state.
+            acceptance = torch.where(
+                raw_acceptance < 0.0,
+                torch.zeros_like(raw_acceptance),
+                torch.where(
+                    raw_acceptance > 1.0,
+                    torch.ones_like(raw_acceptance),
+                    raw_acceptance,
+                ),
+            )
             self.last_acceptance = acceptance.detach()
             mixture = acceptance[:, :, None, None].to(mixture.dtype) * mixture
         else:

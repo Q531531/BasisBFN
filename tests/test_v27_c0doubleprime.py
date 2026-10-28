@@ -250,6 +250,60 @@ def test_c0accept_gate_is_identity_safe_and_only_gate_trains(
     )
 
 
+@pytest.mark.parametrize(
+    ("raw_gate", "expected_gate", "expected_gradient"),
+    [
+        (-0.5, 0.0, 0.0),
+        (-0.0, 0.0, 1.0),
+        (0.0, 0.0, 1.0),
+        (0.5, 0.5, 1.0),
+        (1.0, 1.0, 1.0),
+        (1.5, 1.0, 0.0),
+    ],
+)
+def test_c0accept_gate_preserves_boundary_and_saturation_gradients(
+    raw_gate: float,
+    expected_gate: float,
+    expected_gradient: float,
+) -> None:
+    readout = CategoryRoutedReadout(
+        16,
+        3,
+        ("snow", "outdoor_rain", "raindrop"),
+        acceptance_gate={
+            "enabled": True,
+            "freeze_base_receiver": True,
+        },
+    )
+    assert readout.acceptance_gate is not None
+    with torch.no_grad():
+        for head in readout.heads.values():
+            head.output.weight.zero_()
+            head.output.bias.fill_(1.0)
+        readout.acceptance_gate.bias.fill_(raw_gate)
+
+    output = readout(torch.ones(1, 16, 2, 2))
+    torch.testing.assert_close(
+        output,
+        torch.full_like(output, expected_gate),
+        atol=1e-7,
+        rtol=0,
+    )
+    output.mean().backward()
+    torch.testing.assert_close(
+        readout.acceptance_gate.bias.grad,
+        torch.tensor([expected_gradient]),
+        atol=1e-7,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        readout.acceptance_gate.weight.grad,
+        torch.full_like(readout.acceptance_gate.weight, expected_gradient),
+        atol=1e-7,
+        rtol=0,
+    )
+
+
 def test_c0doubleprime_parameter_identity_and_c0prime_compatibility(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
