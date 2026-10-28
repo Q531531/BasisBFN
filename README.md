@@ -72,14 +72,12 @@ export ALLWEATHER_TEST_ROOT=/path/to/testallweather
 提供官方 SSR 源码、依赖和权重的准备流程，并校验权重 SHA-256。
 若需要 LPIPS 或可选 CLIP 功能，可安装 `python3 -m pip install -e ".[all]"`。
 
-## 数据来源与准备
+## 数据准备
 
-训练数据来自 [TransWeather 官方 All-Weather 合集](https://github.com/jeya-maria-jose/TransWeather#datasets)，
+训练数据使用 All-Weather 合集，
 包含 Outdoor-Rain、Snow100K 和 RainDrop，共 **18,069 对**图像。
 
-- [上游训练数据下载](https://drive.google.com/file/d/1tfeBnjZX1wIhIFPl6HOzzOKOyo0GdGHl/view)
-- [上游文件列表下载](https://drive.google.com/file/d/1UsazX-P3sPcDGw3kxkyFWqUyNfhYN_AM/view)
-- [中文数据来源、配对与划分说明](docs/DATASETS.md)
+[数据配对与划分说明](docs/DATASETS.md)
 
 当前配置要求以下目录与数量：
 
@@ -225,12 +223,3 @@ tests/                                # 回归测试
 Python 导入命名空间保留 `sgbformer`，公开模型／损失名称为 `BasisBFN` 和
 `BasisBFNLoss`；旧名称仍作为 checkpoint 兼容别名。历史实验版本不在当前
 发布目录中，可通过 Git 历史查看。
-
-## 第三方来源与引用
-
-第三方来源和许可证说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-本仓库没有分发 SSR 源码、预训练模型、实验 checkpoint 或数据集图像。
-当前尚未指定统一的项目开源许可证；第三方代码的许可声明仍适用。
-
-引用本项目实现时，可使用此 GitHub 仓库 URL 和具体 commit；
-正式论文引用信息待公开后补充。

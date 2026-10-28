@@ -26,8 +26,3 @@ PR 应说明具体行为变化、运行的验证及其限制。GitHub Actions �
 
 请提供代码 commit、Python／PyTorch／CUDA 版本、运行命令、错误信息和相关
 配置。无需提供访问令牌、数据集图像或预训练权重。
-
-## 第三方来源
-
-依赖和参考实现见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-本仓库尚未指定统一的项目开源许可证，第三方来源的许可声明仍适用。
