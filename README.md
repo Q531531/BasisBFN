@@ -1,148 +1,127 @@
 # ICML2026（4433均分3.5）｜BasisBFN
 
-**BasisBFN：面向恶劣天气图像复原的图像依赖基底贝叶斯残差精修**
+[![自动测试](https://github.com/Q531531/SGBformer-Spectral-Gated-Bayesian-Flow-Network-Enhanced-Transformer/actions/workflows/ci.yml/badge.svg)](https://github.com/Q531531/SGBformer-Spectral-Gated-Bayesian-Flow-Network-Enhanced-Transformer/actions/workflows/ci.yml)
 
-这是 **BasisBFN** 的官方 PyTorch 实现。该方法在冻结的 SSR 复原主干上
-附加轻量级贝叶斯残差精修模块。
+**面向恶劣天气图像复原的图像依赖基底贝叶斯残差精修**
 
-BasisBFN 一次性构造四个图像依赖的 RGB 残差基底，递推更新其空间系数的
-均值和精度，并利用由后验状态条件化的接受门控，将最终校正加回 SSR 基础
-复原结果。
+BasisBFN 在冻结的 SSR 复原主干上添加轻量精修模块：一次生成四个 RGB
+残差基底，在空间系数上执行四步贝叶斯更新，再通过后验条件门控合成校正。
+本仓库提供方法实现、参数匹配的消融配置、训练／推理／评测入口及验证工具。
 
-![BasisBFN architecture](docs/assets/basisbfn_architecture.png)
+[方法细节](docs/BASISBFN.md) · [数据准备](docs/DATASETS.md) ·
+[验证与复现范围](docs/REPRODUCIBILITY.md) · [开发指南](CONTRIBUTING.md)
 
-## 方法要点
+![BasisBFN 训练与推理框架](docs/assets/basisbfn_architecture.png)
 
-- **冻结主干。** SSR 产生基础复原图像和 48 通道 decoder feature，其参数始终
-  冻结。
-- **单次残差表示。** 61 通道条件 U-Net 对每张图像仅运行一次，构造共享上下文
-  和四个局部 RGB 残差基底。
-- **系数空间贝叶斯流。** 共享 observer 对 `4 x H x W` 系数的均值和精度执行
-  四步 precision-weighted 更新。
-- **后验条件接受门控。** 空间 gate 使用图像上下文、最终系数均值和 log-precision
-  缩放残差 proposal。
-- **identity-safe 初始化。** 零初始化 observer 与 gate 的输出投影，保证初始化时
-  输出严格等于冻结 SSR 的输出。
-- **轻量精修。** 完整 refinement branch 仅包含 624,217 个可训练参数。
+## 核心实现
 
-## 论文配置
+- **冻结复原主干：** SSR 产生基础复原图像及 48 通道解码特征，训练时保持冻结。
+- **单次条件 U-Net：** 61 通道条件输入经过 U-Net，生成共享上下文与四个
+  图像依赖的 RGB 残差基底；重型 U-Net 和基底各计算一次。
+- **系数空间 BFN：** 实现系数目标投影、Gaussian sender、噪声状态、
+  共享 observer、离散 BFN 损失和四步贝叶斯精度加权融合。
+- **后验条件门控：** 使用上下文、最终系数均值与对数精度，逐像素控制校正强度。
+- **初始化保持恒等：** observer 输出投影零初始化，保证初始校正严格为零。
+- **轻量精修分支：** 完整新增分支包含 **624,217 个可训练参数**；
+  该数值不包含冻结 SSR 主干。
 
-主模型为 **B4-G**：
+四个消融分支共享参数规模与训练目标，仅改变状态更新规则和门控是否应用：
 
-| 配置项 | 取值 |
-| --- | --- |
-| 残差基底 | `K = 4` |
-| 系数更新步数 | `T = 4` |
-| 更新规则 | Bayesian precision-weighted fusion |
-| Gate 输入 | Context + final mean + final log-precision |
-| 残差尺度 | `0.2` |
-| 系数目标 | Detached ridge projection，ridge `1e-3` |
-| 系数 BFN loss | Equation (15)，权重 `4e-5` |
-| 优化器 | AdamW，LR `2e-4`，weight decay `1e-4` |
-| 训练 | 6 epochs，batch 16，BF16，EMA `0.999` |
-| 论文随机种子 | `42, 43, 44, 45` |
-
-参数匹配的消融矩阵如下：
-
-| Arm | 系数更新 | 接受门控 |
+| 分支 | 系数更新 | 接受门控 |
 | --- | --- | --- |
-| `D4` | additive | 关闭 |
-| `D4-G` | additive | 开启 |
-| `B4` | Bayesian | 关闭 |
-| `B4-G` | Bayesian | 开启 |
+| `D4` | 确定性加法 | 关闭 |
+| `D4-G` | 确定性加法 | 开启 |
+| `B4` | 贝叶斯融合 | 关闭 |
+| `B4-G` | 贝叶斯融合 | 开启 |
 
-## Repository Layout
+## 快速验证：无需数据集和权重
 
-```text
-sgbformer/models/coefficient_state.py  # basis, observer, flow, gate
-sgbformer/models/receiver.py           # one-pass conditional U-Net
-sgbformer/models/foundation.py         # external frozen SSR integration
-sgbformer/models/bfn.py                # Gaussian sender and Bayesian update
-sgbformer/models/model.py              # BasisBFN end-to-end model
-configs/experiments/basisbfn_*.yaml    # B4-G and matched controls
-scripts/preflight_basisbfn.py          # identity/gradient/protocol checks
-scripts/profile_basisbfn.py            # 200-step CUDA smoke profile
-scripts/analyze_basisbfn.py            # fixed endpoint matrix analysis
-```
-
-The Python package retains `sgbformer` as an import namespace for checkpoint
-compatibility. The public model and loss names are `BasisBFN` and
-`BasisBFNLoss`; `SGBFormer` and `SGBFormerLoss` remain aliases for older
-checkpoints.
-
-## 安装
+从仓库根目录执行：
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-pip install -e .
+python3 -m pip install -e ".[dev]"
+
+python3 scripts/smoke_basisbfn.py --device cpu
+python3 -m pytest -q
 ```
 
-SSR 官方源码和 checkpoint 是外部运行依赖，需要单独准备。环境变量如下：
+快速自检运行真实的新增 readout 模块，检查形状、零校正初始化、四步更新、
+后验精度、门控范围及损失反向传播。它使用小型测试张量，**不生成复原图片，
+不衡量 PSNR，也不代替包含 SSR 的完整训练／推理**。
+
+GitHub Actions 自动运行 CPU 回归、模块自检、主要命令入口检查和 wheel 构建。
+
+## 完整运行的环境
+
+建议使用 Python 3.10 或 3.11。CPU 可以运行上述验证；完整 SSR 主干依赖
+NVIDIA CUDA 和 `mamba-ssm`。SSR 官方源码与预训练权重需要单独准备：
 
 ```bash
 export SSR_REPO=/path/to/SSR
 export SSR_CHECKPOINT="$SSR_REPO/Allweather/pretrained_models/net_g_best.pth"
 export SGB_DATA_ROOT=/path/to/allweather
-export ALLWEATHER_TEST_ROOT=/path/to/official/testallweather
+export ALLWEATHER_TEST_ROOT=/path/to/testallweather
 ```
+
+[`scripts/setup_ssr_foundation.sh`](scripts/setup_ssr_foundation.sh)
+提供官方 SSR 源码、依赖和权重的准备流程，并校验权重 SHA-256。
+若需要 LPIPS 或可选 CLIP 功能，可安装 `python3 -m pip install -e ".[all]"`。
 
 ## 数据来源与准备
 
-训练数据来自 [TransWeather 官方发布的 All-Weather 合集](https://github.com/jeya-maria-jose/TransWeather#datasets)：
-从 **Outdoor-Rain、Snow100K 和 RainDrop** 数据集中采样，共 **18,069 对**
-退化图像与干净图像。
+训练数据来自 [TransWeather 官方 All-Weather 合集](https://github.com/jeya-maria-jose/TransWeather#datasets)，
+包含 Outdoor-Rain、Snow100K 和 RainDrop，共 **18,069 对**图像。
 
-- [All-Weather 训练数据下载](https://drive.google.com/file/d/1tfeBnjZX1wIhIFPl6HOzzOKOyo0GdGHl/view)
+- [上游训练数据下载](https://drive.google.com/file/d/1tfeBnjZX1wIhIFPl6HOzzOKOyo0GdGHl/view)
 - [上游文件列表下载](https://drive.google.com/file/d/1UsazX-P3sPcDGw3kxkyFWqUyNfhYN_AM/view)
-- 原始数据与测试集入口：[Snow100K / DesnowNet](https://sites.google.com/view/yunfuliu/desnownet)、
-  [RainDrop / DeRaindrop](https://github.com/rui1996/DeRaindrop#dataset)；
-  Outdoor-Rain 的合集来源见上述 TransWeather 官方说明。
+- [中文数据来源、配对与划分说明](docs/DATASETS.md)
 
-仓库提供 [`scripts/download_all_weather.sh`](scripts/download_all_weather.sh)
-下载上游数据包和列表；文件整理、配对规则、固定划分与测试集目录见
-**[中文数据准备说明](docs/DATASETS.md)**。
-
-`SGB_DATA_ROOT` 应包含：
+当前配置要求以下目录与数量：
 
 ```text
-input/
-gt/
-train_pairs.tsv
-val_pairs.tsv
+allweather/
+├── input/
+├── gt/
+├── train_pairs.tsv     # 17,166 对
+└── val_pairs.tsv       # 903 对
 ```
 
-当前配置要求 **17,166 对训练数据 + 903 对验证数据**。四个模型训练种子
-`42/43/44/45` 应共用同一份数据划分。
+四个模型训练种子 `42/43/44/45` 共用同一份数据划分。**原实验的两份 TSV
+清单及其校验值目前未公开**，重新生成相同数量的划分不能证明逐图一致。
 
-**原实验的 `train_pairs.tsv`、`val_pairs.tsv` 及其校验值目前未随仓库发布。**
-仓库中的划分脚本可以重新生成确定性清单，但在缺少原清单或其校验值时，
-不能保证与原实验逐图一致。数据集图像及模型权重也未上传。
+正式测试使用 Snow100K-S、Snow100K-L、Outdoor-Rain Test1 和 RainDrop
+Test-A，与训练／验证数据分别保存。
 
-正式测试集使用 **Snow100K-S、Snow100K-L、Outdoor-Rain Test1 和 RainDrop
-Test-A**，应与训练／验证数据分别保存。
+## 论文配置
 
-## Generate A Paper-Seed Config
+主模型为 `B4-G`：
 
-Generate an arm/seed overlay so runs and verification artifacts cannot
-overwrite one another:
+| 配置项 | 取值 |
+| --- | --- |
+| 残差基底／系数更新步数 | `K = 4`／`T = 4` |
+| Gate 输入 | 上下文、后验均值、对数精度 |
+| 残差尺度 | `0.2` |
+| 系数目标 | 停止梯度的 ridge 投影，ridge `1e-3` |
+| 系数 BFN 损失配置权重 | `4e-5`，公式解释见方法文档 |
+| 优化器 | AdamW，学习率 `2e-4`，weight decay `1e-4` |
+| 训练 | 6 epochs，batch 16，BF16，EMA `0.999` |
+| 模型训练种子 | `42, 43, 44, 45` |
+| 固定评测端点 | epoch-6 EMA checkpoint |
+
+## 生成配置、预检与训练
+
+以 `B4-G`、seed 42 为例：
 
 ```bash
 python3 scripts/make_basisbfn_config.py \
-  --arm B4-G \
-  --seed 42 \
+  --arm B4-G --seed 42 \
   --output configs/generated/basisbfn_b4g_seed42.yaml
-```
 
-Valid paper seeds are `42`, `43`, `44`, and `45`.
+python3 scripts/check_dataset.py \
+  --config configs/generated/basisbfn_b4g_seed42.yaml
 
-## Preflight And CUDA Profile
-
-The training entry point requires a matching preflight and 200-step profile.
-For B4-G seed 42:
-
-```bash
 python3 scripts/preflight_basisbfn.py \
   --config configs/generated/basisbfn_b4g_seed42.yaml \
   --output-dir runs/basisbfn/artifacts/b4-g/seed_42/preflight \
@@ -153,43 +132,35 @@ python3 scripts/profile_basisbfn.py \
   --preflight runs/basisbfn/artifacts/b4-g/seed_42/preflight/preflight_b4-g.json \
   --output runs/basisbfn/artifacts/b4-g/seed_42/profile.json \
   --device cuda
-```
 
-The preflight verifies the exact parameter count, frozen SSR state, initial
-identity, DCT initialization, finite coefficient BFN loss, posterior precision
-growth, gate bounds, and first/second-step gradient reachability.
-
-## Training
-
-```bash
 python3 train.py \
   --config configs/generated/basisbfn_b4g_seed42.yaml \
   --device cuda
 ```
 
-The paper endpoint is the epoch-6 EMA checkpoint:
+训练入口要求配置、代码指纹和对应 arm 的 preflight／200-step profile 一致。
+预检覆盖冻结状态、参数量、初始化、损失有效性与梯度可达性。
+其它分支和种子使用相同流程，分别生成配置和运行目录。
+
+## 推理与评测
+
+训练后的固定端点为：
 
 ```text
 runs/basisbfn/b4-g/seed_42/epoch_0006.pt
 ```
 
-Repeat the same sequence for seeds `43`, `44`, and `45`. Matched D4, D4-G,
-and B4 controls use the same generator with a different `--arm`.
-
-## Inference
+对真实图片进行推理：
 
 ```bash
 python3 infer.py \
   --checkpoint runs/basisbfn/b4-g/seed_42/epoch_0006.pt \
   --input /path/to/degraded/images \
   --output results/basisbfn \
-  --device cuda \
-  --deterministic
+  --device cuda --deterministic
 ```
 
-## Evaluation
-
-Development evaluation:
+按明确的图像对清单进行验证集评测：
 
 ```bash
 python3 evaluate.py \
@@ -197,42 +168,58 @@ python3 evaluate.py \
   --input-dir "$SGB_DATA_ROOT/input" \
   --target-dir "$SGB_DATA_ROOT/gt" \
   --pairs-file "$SGB_DATA_ROOT/val_pairs.tsv" \
-  --device cuda \
-  --test-y-channel \
-  --compare-structural \
+  --device cuda --test-y-channel --compare-structural \
   --json results/basisbfn_b4g_seed42.json
 ```
 
-Paper-facing evaluation uses the untouched Snow100K-S, Snow100K-L,
-Outdoor-Rain Test1, and RainDrop Test-A subsets. See
-[`docs/BASISBFN.md`](docs/BASISBFN.md) and the scripts in `scripts/` for the
-fixed matrix analysis.
+正式四子集的目录检查与评测入口分别为
+[`check_allweather_test.py`](scripts/check_allweather_test.py) 和
+[`evaluate_allweather.sh`](scripts/evaluate_allweather.sh)。
 
-## Reported Manuscript Results
+## 结果与证据范围
 
-The manuscript reports four-seed means:
+以下是论文稿报告的四种子均值，**公开仓库尚未附这些结果的原始逐图评测
+JSON 和完整实验资产，因此不表示已由本仓库自动复现**：
 
-| Model | Average PSNR | Average SSIM |
+| 模型 | 平均 PSNR | 平均 SSIM |
 | --- | ---: | ---: |
 | SSR | 34.15 | 0.9442 |
-| BasisBFN B4-G | **34.50** | **0.9483** |
+| BasisBFN B4-G | 34.50 | 0.9483 |
 
-Within the matched refinement matrix, the manuscript reports `+0.10 dB` from
-Bayesian fusion and `+0.08 dB` from acceptance gating. These are paper results,
-not claims produced by the unit tests in this repository.
+论文稿另报告贝叶斯融合贡献 `+0.10 dB`、门控贡献 `+0.08 dB`。
+代码测试只验证实现行为，不证明这些质量增益。标题中的
+`ICML2026（4433均分3.5）` 是项目提供的评审信息，不表示论文已录用。
 
-## Tests
+可公开复查的实现证据及精确复现所需材料见
+[验证与复现范围](docs/REPRODUCIBILITY.md)。
 
-```bash
-python3 -m pytest -q
+## 代码导航
+
+```text
+sgbformer/models/coefficient_state.py  # 基底、系数 observer、BFN 目标与门控
+sgbformer/models/receiver.py           # 单次条件 U-Net
+sgbformer/models/bfn.py                # Gaussian sender、贝叶斯更新和离散损失
+sgbformer/models/foundation.py         # 外部冻结 SSR 集成
+sgbformer/models/model.py              # 完整模型与训练输出
+sgbformer/losses.py                    # 训练损失组合
+sgbformer/data/                        # 图像对加载与采样
+configs/experiments/basisbfn_*.yaml     # 主模型和参数匹配的消融配置
+scripts/smoke_basisbfn.py              # 无权重的模块自检
+scripts/preflight_basisbfn.py          # 训练前预检
+scripts/profile_basisbfn.py            # 200-step CUDA profile
+scripts/analyze_basisbfn.py            # 固定端点与消融矩阵分析
+tests/                                # 回归测试
+.github/workflows/ci.yml               # GitHub 自动验证
 ```
 
-## Third-Party Code And Weights
+Python 导入命名空间保留 `sgbformer`，公开模型／损失名称为 `BasisBFN` 和
+`BasisBFNLoss`；旧名称仍作为 checkpoint 兼容别名。
 
-See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). SSR source and weights
-are not included because the upstream repository did not provide a license
-file when this integration was prepared.
+## 第三方来源与引用
 
-## Citation
+第三方来源和许可证说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本仓库没有分发 SSR 源码、预训练模型、实验 checkpoint 或数据集图像。
+当前尚未指定统一的项目开源许可证；第三方代码的许可声明仍适用。
 
-Citation metadata will be added after the anonymous review process.
+引用本项目实现时，可使用此 GitHub 仓库 URL 和具体 commit；
+正式论文引用信息待公开后补充。

@@ -3,10 +3,17 @@ __pycache__/
 .DS_Store
 .pytest_cache/
 .ruff_cache/
+.venv/
 *.egg-info/
 build/
 dist/
+downloads/
 datasets/
 runs/
 results/
 tests/artifacts/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
