@@ -290,16 +290,18 @@ def test_c0accept_gate_preserves_boundary_and_saturation_gradients(
         rtol=0,
     )
     output.mean().backward()
+    # The softmax mixture and mean reduction can round by one float32 ULP.
+    gradient_tolerance = 2 * torch.finfo(output.dtype).eps
     torch.testing.assert_close(
         readout.acceptance_gate.bias.grad,
         torch.tensor([expected_gradient]),
-        atol=1e-7,
+        atol=gradient_tolerance,
         rtol=0,
     )
     torch.testing.assert_close(
         readout.acceptance_gate.weight.grad,
         torch.full_like(readout.acceptance_gate.weight, expected_gradient),
-        atol=1e-7,
+        atol=gradient_tolerance,
         rtol=0,
     )
 
