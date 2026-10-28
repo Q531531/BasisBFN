@@ -70,7 +70,7 @@ compatibility. The public model and loss names are `BasisBFN` and
 `BasisBFNLoss`; `SGBFormer` and `SGBFormerLoss` remain aliases for older
 checkpoints.
 
-## Installation
+## 安装
 
 ```bash
 python3 -m venv .venv
@@ -79,8 +79,7 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-The official SSR source and checkpoint are runtime dependencies and are not
-redistributed here. Set:
+SSR 官方源码和 checkpoint 是外部运行依赖，需要单独准备。环境变量如下：
 
 ```bash
 export SSR_REPO=/path/to/SSR
@@ -89,7 +88,23 @@ export SGB_DATA_ROOT=/path/to/allweather
 export ALLWEATHER_TEST_ROOT=/path/to/official/testallweather
 ```
 
-`SGB_DATA_ROOT` must contain:
+## 数据来源与准备
+
+训练数据来自 [TransWeather 官方发布的 All-Weather 合集](https://github.com/jeya-maria-jose/TransWeather#datasets)：
+从 **Outdoor-Rain、Snow100K 和 RainDrop** 数据集中采样，共 **18,069 对**
+退化图像与干净图像。
+
+- [All-Weather 训练数据下载](https://drive.google.com/file/d/1tfeBnjZX1wIhIFPl6HOzzOKOyo0GdGHl/view)
+- [上游文件列表下载](https://drive.google.com/file/d/1UsazX-P3sPcDGw3kxkyFWqUyNfhYN_AM/view)
+- 原始数据与测试集入口：[Snow100K / DesnowNet](https://sites.google.com/view/yunfuliu/desnownet)、
+  [RainDrop / DeRaindrop](https://github.com/rui1996/DeRaindrop#dataset)；
+  Outdoor-Rain 的合集来源见上述 TransWeather 官方说明。
+
+仓库提供 [`scripts/download_all_weather.sh`](scripts/download_all_weather.sh)
+下载上游数据包和列表；文件整理、配对规则、固定划分与测试集目录见
+**[中文数据准备说明](docs/DATASETS.md)**。
+
+`SGB_DATA_ROOT` 应包含：
 
 ```text
 input/
@@ -98,8 +113,15 @@ train_pairs.tsv
 val_pairs.tsv
 ```
 
-The paper split contains 17,166 training pairs and 903 held-out development
-pairs.
+当前配置要求 **17,166 对训练数据 + 903 对验证数据**。四个模型训练种子
+`42/43/44/45` 应共用同一份数据划分。
+
+**原实验的 `train_pairs.tsv`、`val_pairs.tsv` 及其校验值目前未随仓库发布。**
+仓库中的划分脚本可以重新生成确定性清单，但在缺少原清单或其校验值时，
+不能保证与原实验逐图一致。数据集图像及模型权重也未上传。
+
+正式测试集使用 **Snow100K-S、Snow100K-L、Outdoor-Rain Test1 和 RainDrop
+Test-A**，应与训练／验证数据分别保存。
 
 ## Generate A Paper-Seed Config
 
