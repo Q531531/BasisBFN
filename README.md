@@ -1,59 +1,55 @@
-# BasisBFN
+# ICML2026（4433均分3.5）｜BasisBFN
 
-**Bayesian Residual Refinement with Image-Dependent Bases for Adverse Weather Image Restoration**
+**BasisBFN：面向恶劣天气图像复原的图像依赖基底贝叶斯残差精修**
 
-Official PyTorch implementation of **BasisBFN**, a compact Bayesian residual
-refiner attached to a frozen SSR restoration backbone.
+这是 **BasisBFN** 的官方 PyTorch 实现。该方法在冻结的 SSR 复原主干上
+附加轻量级贝叶斯残差精修模块。
 
-BasisBFN constructs four image-dependent RGB residual bases once, recurrently
-updates the means and precisions of their spatial coefficients, and applies a
-posterior-conditioned acceptance gate before adding the correction to the SSR
-base image.
+BasisBFN 一次性构造四个图像依赖的 RGB 残差基底，递推更新其空间系数的
+均值和精度，并利用由后验状态条件化的接受门控，将最终校正加回 SSR 基础
+复原结果。
 
 ![BasisBFN architecture](docs/assets/basisbfn_architecture.png)
 
-## Highlights
+## 方法要点
 
-- **Frozen strong backbone.** SSR produces the base restoration and a
-  48-channel decoder feature. SSR parameters remain frozen.
-- **One-pass residual representation.** A 61-channel conditional U-Net builds
-  a shared context and four local RGB residual bases once per image.
-- **Coefficient-space Bayesian flow.** A shared observer performs four
-  precision-weighted updates over `4 x H x W` coefficient means and
-  precisions.
-- **Posterior-conditioned acceptance.** A spatial gate uses image context,
-  final coefficient means, and log-precisions to scale the proposed
-  correction.
-- **Identity-safe initialization.** Zero-initialized observer and gate output
-  projections preserve the frozen SSR output at initialization.
-- **Compact refinement.** The complete refinement branch has 624,217
-  trainable parameters.
+- **冻结主干。** SSR 产生基础复原图像和 48 通道 decoder feature，其参数始终
+  冻结。
+- **单次残差表示。** 61 通道条件 U-Net 对每张图像仅运行一次，构造共享上下文
+  和四个局部 RGB 残差基底。
+- **系数空间贝叶斯流。** 共享 observer 对 `4 x H x W` 系数的均值和精度执行
+  四步 precision-weighted 更新。
+- **后验条件接受门控。** 空间 gate 使用图像上下文、最终系数均值和 log-precision
+  缩放残差 proposal。
+- **identity-safe 初始化。** 零初始化 observer 与 gate 的输出投影，保证初始化时
+  输出严格等于冻结 SSR 的输出。
+- **轻量精修。** 完整 refinement branch 仅包含 624,217 个可训练参数。
 
-## Paper Configuration
+## 论文配置
 
-The main model is **B4-G**:
+主模型为 **B4-G**：
 
-| Setting | Value |
+| 配置项 | 取值 |
 | --- | --- |
-| Residual bases | `K = 4` |
-| Coefficient updates | `T = 4` |
-| Update | Bayesian precision-weighted fusion |
-| Gate | Context + final mean + final log-precision |
-| Residual scale | `0.2` |
-| Coefficient target | Detached ridge projection, ridge `1e-3` |
-| Coefficient BFN loss | Equation (15), weight `4e-5` |
-| Optimizer | AdamW, LR `2e-4`, weight decay `1e-4` |
-| Training | 6 epochs, batch 16, BF16, EMA `0.999` |
-| Paper seeds | `42, 43, 44, 45` |
+| 残差基底 | `K = 4` |
+| 系数更新步数 | `T = 4` |
+| 更新规则 | Bayesian precision-weighted fusion |
+| Gate 输入 | Context + final mean + final log-precision |
+| 残差尺度 | `0.2` |
+| 系数目标 | Detached ridge projection，ridge `1e-3` |
+| 系数 BFN loss | Equation (15)，权重 `4e-5` |
+| 优化器 | AdamW，LR `2e-4`，weight decay `1e-4` |
+| 训练 | 6 epochs，batch 16，BF16，EMA `0.999` |
+| 论文随机种子 | `42, 43, 44, 45` |
 
-The matched ablation matrix is:
+参数匹配的消融矩阵如下：
 
-| Arm | Coefficient update | Acceptance gate |
+| Arm | 系数更新 | 接受门控 |
 | --- | --- | --- |
-| `D4` | additive | off |
-| `D4-G` | additive | on |
-| `B4` | Bayesian | off |
-| `B4-G` | Bayesian | on |
+| `D4` | additive | 关闭 |
+| `D4-G` | additive | 开启 |
+| `B4` | Bayesian | 关闭 |
+| `B4-G` | Bayesian | 开启 |
 
 ## Repository Layout
 

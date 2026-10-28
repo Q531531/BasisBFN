@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "basisbfn"
 version = "1.0.0"
-description = "Bayesian residual refinement with image-dependent bases for adverse weather image restoration"
+description = "ICML2026（4433均分3.5）｜BasisBFN：基于图像依赖基底的恶劣天气图像复原贝叶斯残差精修"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
