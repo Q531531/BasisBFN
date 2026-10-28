@@ -383,6 +383,8 @@ def test_cli_can_fail_on_a_broken_self_check(tmp_path: Path) -> None:
             "--bootstrap-samples",
             "200",
             "--require-reported-delta",
+            "--reported-delta-psnr",
+            "-0.083995",
         ]
     )
     assert code == 2

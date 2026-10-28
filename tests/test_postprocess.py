@@ -33,7 +33,6 @@ def test_self_ensemble_runs_all_views_and_restores_original_geometry() -> None:
         return view + 0.25
 
     restored = self_ensemble_restore(restore, image)
-
     assert len(seen_shapes) == SELF_ENSEMBLE_TRANSFORMS
     assert set(seen_shapes) == {(2, 3, 5, 7), (2, 3, 7, 5)}
     torch.testing.assert_close(restored, image + 0.25, rtol=0, atol=2e-7)
@@ -55,30 +54,21 @@ def test_checkpoint_average_uses_ema_view_and_preserves_equal_buffers() -> None:
         "ema": {"shadow": {"weight": torch.tensor([6.0, 8.0])}},
     }
     paths = [Path("first.pt"), Path("second.pt")]
-
     states = [
         weight_view(checkpoint, path, "ema")
         for checkpoint, path in zip((first, second), paths)
     ]
     averaged = average_states(states, paths)
-
     torch.testing.assert_close(
-        averaged["weight"],
-        torch.tensor([4.0, 6.0]),
-        rtol=0,
-        atol=0,
+        averaged["weight"], torch.tensor([4.0, 6.0]), rtol=0, atol=0,
     )
     torch.testing.assert_close(
-        averaged["counter"],
-        torch.tensor(7, dtype=torch.int64),
-        rtol=0,
-        atol=0,
+        averaged["counter"], torch.tensor(7, dtype=torch.int64), rtol=0, atol=0,
     )
 
 
 def test_checkpoint_average_cli_writes_non_resumable_eval_checkpoint(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     inputs = []
     for index, value in enumerate((2.0, 4.0), start=1):
@@ -104,30 +94,19 @@ def test_checkpoint_average_cli_writes_non_resumable_eval_checkpoint(
             path,
         )
         inputs.append(path)
-
     output = tmp_path / "averaged.pt"
     monkeypatch.setattr(
-        sys,
-        "argv",
+        sys, "argv",
         [
-            "average_checkpoints.py",
-            "--inputs",
-            *(str(path) for path in inputs),
-            "--weights",
-            "ema",
-            "--output",
-            str(output),
+            "average_checkpoints.py", "--inputs",
+            *(str(path) for path in inputs), "--weights", "ema",
+            "--output", str(output),
         ],
     )
-
     average_checkpoints_main()
     payload = torch.load(output, map_location="cpu", weights_only=True)
-
     torch.testing.assert_close(
-        payload["model"]["weight"],
-        torch.tensor([3.0]),
-        rtol=0,
-        atol=0,
+        payload["model"]["weight"], torch.tensor([3.0]), rtol=0, atol=0,
     )
     assert payload["averaged_weights"] == "ema"
     assert payload["averaged_checkpoints"] == 2

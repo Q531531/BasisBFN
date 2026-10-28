@@ -22,9 +22,8 @@ from sgbformer.inference import (
     restore_tensor,
 )
 from sgbformer.metrics import LPIPSMetric, psnr, ssim, uncertainty_scores
-from sgbformer.protocol import sha256_file
+from sgbformer.protocol import resolved_config_sha256, sha256_file
 from sgbformer.utils import resolve_device, save_image, seed_everything
-from sgbformer.v27 import resolved_config_sha256
 
 
 def parse_category_patterns(values: list[str]) -> dict[str, re.Pattern[str]]:
@@ -671,8 +670,16 @@ def main() -> None:
                 "lpips_network": "alex" if args.lpips else None,
                 "stochastic": (
                     args.stochastic
-                    and model.refinement_mode == "iterative"
-                    and not model.latent_bfn_enabled
+                    and (
+                        (
+                            model.refinement_mode == "iterative"
+                            and not model.latent_bfn_enabled
+                        )
+                        or (
+                            model.coefficient_state_readout_enabled
+                            and model.receiver.output.update_mode == "bayesian"
+                        )
+                    )
                 ),
                 "tile": args.tile,
                 "overlap": args.overlap if args.tile is not None else None,

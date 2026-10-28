@@ -16,9 +16,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from analyze_dev_by_category import read_name_map
-from analyze_v27_c0prime import CATEGORIES, category_psnr, compare, write_json
-from sgbformer.protocol import sha256_file
-from sgbformer.v27 import resolved_config_sha256
+from analysis_helpers import CATEGORIES, category_psnr, compare, write_json
+from sgbformer.protocol import resolved_config_sha256, sha256_file
 from sgbformer.basisbfn import (
     BASISBFN_ARMS,
     BASISBFN_EXPECTED_DEV_PAIRS,
@@ -124,6 +123,7 @@ def validate_fixed_endpoint(
         "coefficient_gate_enabled": BASISBFN_ARMS[arm][
             "gate_enabled"
         ],
+        "bfn_gain": 1.0,
     }
     for key, expected_value in expected.items():
         if protocol.get(key) != expected_value:
@@ -135,6 +135,7 @@ def validate_fixed_endpoint(
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_sha256": sha256_file(checkpoint_path),
         "checkpoint_epoch": int(checkpoint["epoch"]),
+        "seed": int(config["seed"]),
         "checkpoint_global_step": int(checkpoint.get("global_step", 0)),
         "resolved_config_sha256": resolved_config_sha256(config),
         "evaluation_path": str(evaluation_path),
@@ -165,6 +166,8 @@ def main() -> None:
         )
         for arm in BASISBFN_ARMS
     }
+    if len({endpoint["seed"] for endpoint in endpoints.values()}) != 1:
+        raise ValueError("A controlled matrix must use the same training seed for all arms")
     name_map = read_name_map(pairs_file)
     if len(name_map) != BASISBFN_EXPECTED_DEV_PAIRS:
         raise ValueError(

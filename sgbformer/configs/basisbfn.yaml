@@ -1,0 +1,174 @@
+# 唯一的 BasisBFN 公共契约。四组实验只覆盖更新规则、门控和运行路径。
+# 随 Python 包分发；本文件不能直接用于训练。
+seed: 42
+model:
+  in_channels: 3
+  out_channels: 3
+  dim: 32
+  num_blocks: [4, 6, 6, 8]
+  refinement_blocks: 4
+  heads: [1, 2, 4, 8]
+  ffn_expansion_factor: 2.66
+  conv_bias: false
+  norm_bias: true
+  semantic:
+    encoder: none
+    model_name: ViT-B-32
+    pretrained: laion2b_s34b_b79k
+    image_size: 224
+    embedding_dim: 1
+    context_tokens: 1
+  foundation:
+    type: external_ssr
+    repo_path: ${SSR_REPO}
+    checkpoint: ${SSR_CHECKPOINT}
+    architecture_file: basicsr/models/archs/SSR_arch.py
+    model_class: SSR
+    feature_module: decoder_level1
+    param_key: params
+    strict_load: true
+    freeze: true
+    required_multiple: 8
+    checkpoint_compatible_edffn: true
+    architecture:
+      inp_channels: 3
+      out_channels: 3
+      dim: 48
+      num_blocks: [3, 3, 6]
+      ffn_expansion_factor: 3
+      bias: false
+    frozen_modules_eval: true
+    trainable_modules: []
+    feature_adapters: {}
+  core:
+    require_spectral_gate: false
+    require_iterative_bfn: false
+    require_entropy_mask: false
+  mean_correction:
+    enabled: false
+  latent_bfn:
+    enabled: false
+  bfn:
+    steps: 4
+    min_variance: 0.01
+    base_channels: 16
+    channel_multipliers: [1, 2, 4]
+    blocks_per_level: 2
+    attention_heads: 4
+    dropout: 0.0
+    entropy_kernel: 9
+    entropy_bins: 16
+    entropy_threshold: 0.25
+    min_accuracy_scale: 1.0
+    inference_mode: direct
+    receiver_type: unet
+    receiver_trainable: true
+    condition_mode: observation_rich
+    receiver_output_mode: identity
+    update_mode: deterministic
+    readout_mode: receiver
+    residual_base_clamp: true
+    residual_scale: 0.2
+    accuracy_schedule: linear_beta
+    mask_mode: none
+    training_final_state: rollout
+    training_rollout_steps: 1
+    rollout_backprop_steps: 1
+    rollout_batch_fraction: 1.0
+    coefficient_state_readout:
+      enabled: true
+      type: spatial_coefficient_flow
+      num_bases: 4
+      steps: 4
+      hidden_channels: 16
+      kernel_size: 3
+      basis_init: dct_orthogonal
+      basis_init_gain: 1.0
+      observation_activation: tanh
+      coefficient_activation: tanh
+      coefficient_range: [-1.0, 1.0]
+      normalization: inverse_sqrt_num_bases
+      zero_init_observer: true
+      update_mode: deterministic
+      min_variance: 0.01
+      accuracy_schedule: linear_beta
+      min_accuracy_scale: 0.25
+      target_ridge: 0.001
+      acceptance_gate:
+        enabled: false
+        type: posterior_spatial_sigmoid
+        condition: [context, posterior_mean, log_precision]
+        range: [0.0, 1.0]
+        initial_probability: 0.5
+loss:
+  structural_weight: 0.0
+  bfn_weight: 0.00004
+  final_weight: 1.0
+  charbonnier_epsilon: 0.001
+  structural_loss_type: mse
+  final_loss_type: mse
+  frequency_weight: 0.0
+  correlation_weight: 0.0
+  adapter_weight: 0.0
+  uncertainty_weight: 0.0
+  latent_category_weight: 0.0
+validation:
+  lpips: false
+  lpips_network: alex
+  crop_border: 0
+  test_y_channel: true
+data:
+  workers: 12
+  train:
+    input_dir: ${SGB_DATA_ROOT}/input
+    target_dir: ${SGB_DATA_ROOT}/gt
+    patch_size: 256
+    augment: true
+    strict: true
+    pairs_file: ${SGB_DATA_ROOT}/train_pairs.tsv
+  val:
+    input_dir: ${SGB_DATA_ROOT}/input
+    target_dir: ${SGB_DATA_ROOT}/gt
+    strict: true
+    pairs_file: ${SGB_DATA_ROOT}/val_pairs.tsv
+training:
+  output_dir: runs/basisbfn/common_not_launchable
+  epochs: 6
+  batch_size: 16
+  micro_batch_size: 2
+  learning_rate: 0.0002
+  minimum_learning_rate: 0.000001
+  minimum_learning_rate_ratio: 0.1
+  schedule_minimum_mode: per_group
+  warmup_epochs: 1
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+  gradient_accumulation: 1
+  gradient_clip: 1.0
+  ema_decay: 0.999
+  ema_warmup_updates: 2000
+  amp: true
+  amp_dtype: bfloat16
+  allow_tf32: true
+  cudnn_benchmark: true
+  log_interval: 250
+  validate_interval: 1
+  save_interval: 1
+  reproducible_data: true
+  sampling: {mode: shuffle}
+  stages: [{name: residual, epochs: 6}]
+  basisbfn_preflight_report: null
+  basisbfn_profile_report: null
+protocol:
+  name: basisbfn
+  arm: common
+  arm_description: common non-launchable BasisBFN contract
+  preregistered: true
+  primary_endpoint: fixed_epoch_6
+  diagnostic_endpoints: [fixed_epoch_1, fixed_epoch_2, fixed_epoch_3, fixed_epoch_4, fixed_epoch_5]
+  checkpoint_selection: fixed_epoch_6_only
+  expected_train_pairs: 17166
+  expected_dev_pairs: 903
+  expected_trainable_parameters: 624217
+  official_test_locked: true
+  long_training_locked: true

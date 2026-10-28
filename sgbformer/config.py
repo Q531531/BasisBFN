@@ -34,13 +34,20 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
+    return _load_config(Path(path).resolve(), ())
+
+
+def _load_config(path: Path, ancestors: tuple[Path, ...]) -> dict[str, Any]:
     path = Path(path).resolve()
+    if path in ancestors:
+        chain = " -> ".join(str(item) for item in (*ancestors, path))
+        raise ValueError(f"Configuration inheritance cycle: {chain}")
     with path.open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
     if not isinstance(config, dict):
         raise ValueError(f"Configuration root must be a mapping: {path}")
     base_path = config.pop("_base_", None)
     if base_path is not None:
-        base_config = load_config(path.parent / str(base_path))
+        base_config = _load_config(path.parent / str(base_path), (*ancestors, path))
         config = _deep_merge(base_config, config)
     return _expand(config)
