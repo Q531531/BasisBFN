@@ -1,0 +1,2 @@
+# 公共契约随 Python 包分发。
+_base_: ../../sgbformer/configs/basisbfn.yaml

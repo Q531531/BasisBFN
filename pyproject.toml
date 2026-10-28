@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "basisbfn"
+version = "1.0.0"
+description = "ICML2026（4433均分3.5）｜BasisBFN：基于图像依赖基底的恶劣天气图像复原贝叶斯残差精修"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "numpy>=1.24",
+  "Pillow>=9.5",
+  "PyYAML>=6.0",
+  "torch>=2.1",
+]
+
+[project.optional-dependencies]
+clip = ["open_clip_torch>=2.24"]
+metrics = ["lpips>=0.1.4"]
+dev = ["pytest>=8.0"]
+all = [
+  "lpips>=0.1.4",
+  "open_clip_torch>=2.24",
+  "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["sgbformer*"]
+
+[tool.setuptools.package-data]
+sgbformer = ["configs/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
