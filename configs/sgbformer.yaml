@@ -1,0 +1,97 @@
+seed: 42
+
+model:
+  in_channels: 3
+  out_channels: 3
+  dim: 32
+  num_blocks: [4, 6, 6, 8]
+  refinement_blocks: 4
+  heads: [1, 2, 4, 8]
+  ffn_expansion_factor: 2.66
+  conv_bias: false
+  norm_bias: true
+  semantic:
+    encoder: open_clip
+    model_name: ViT-B-32
+    pretrained: laion2b_s34b_b79k
+    image_size: 224
+    embedding_dim: 512
+    context_tokens: 4
+  bfn:
+    steps: 10
+    min_variance: 0.0001
+    base_channels: 24
+    channel_multipliers: [1, 2, 4]
+    blocks_per_level: 2
+    attention_heads: 4
+    dropout: 0.0
+    entropy_kernel: 9
+    entropy_bins: 16
+    entropy_threshold: 0.25
+    min_accuracy_scale: 0.25
+
+loss:
+  structural_weight: 1.0
+  bfn_weight: 0.001
+  final_weight: 0.1
+  charbonnier_epsilon: 0.001
+
+validation:
+  lpips: true
+  lpips_network: alex
+
+data:
+  workers: 8
+  train:
+    input_dir: datasets/AllWeather/train/input
+    target_dir: datasets/AllWeather/train/target
+    patch_size: 128
+    augment: true
+    strict: true
+    # pairs_file: datasets/AllWeather/train_pairs.tsv
+  val:
+    input_dir: datasets/AllWeather/val/input
+    target_dir: datasets/AllWeather/val/target
+    strict: true
+    # pairs_file: datasets/AllWeather/val_pairs.tsv
+
+training:
+  output_dir: runs/sgbformer
+  epochs: 300
+  # Global batch size. torchrun divides this value across all processes.
+  batch_size: 16
+  learning_rate: 0.0002
+  minimum_learning_rate: 0.000001
+  warmup_epochs: 5
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+  gradient_accumulation: 1
+  gradient_clip: 1.0
+  ema_decay: 0.999
+  ema_warmup_updates: 2000
+  amp: true
+  amp_dtype: bfloat16
+  allow_tf32: true
+  cudnn_benchmark: true
+  log_interval: 50
+  validate_interval: 1
+  save_interval: 10
+  stages:
+    - name: structure
+      epochs: 180
+      loss:
+        structural_weight: 1.0
+        bfn_weight: 0.0
+        final_weight: 0.0
+    - name: bfn
+      epochs: 80
+      loss:
+        structural_weight: 0.0
+        bfn_weight: 0.001
+        final_weight: 0.0
+    - name: joint
+      epochs: 40
+      loss:
+        structural_weight: 1.0
+        bfn_weight: 0.001
+        final_weight: 0.1

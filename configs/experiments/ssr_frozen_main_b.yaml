@@ -1,0 +1,17 @@
+_base_: _ssr_frozen_main_common.yaml
+
+protocol:
+  arm: B
+  arm_description: bayesian latent state update
+
+model:
+  latent_bfn:
+    update_mode: bayesian
+
+loss:
+  bfn_weight: 0.01
+  latent_category_weight: 0.01
+
+training:
+  output_dir: runs/frozen_main/B
+  budget_arm: B

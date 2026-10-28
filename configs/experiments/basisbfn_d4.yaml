@@ -1,0 +1,10 @@
+_base_: _basisbfn_common.yaml
+
+protocol:
+  arm: D4
+  arm_description: four-step additive coefficient update without gate
+
+training:
+  output_dir: runs/basisbfn/d4
+  basisbfn_preflight_report: runs/basisbfn/preflight/preflight_d4.json
+  basisbfn_profile_report: runs/basisbfn/profiles/D4.json

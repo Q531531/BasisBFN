@@ -1,0 +1,52 @@
+_base_: ssr_residual_v27_c0_proxy.yaml
+
+# Shared paper-protocol BasisBFN matrix. This file is not launchable.
+protocol:
+  name: basisbfn
+  arm: common
+  arm_description: common non-launchable BasisBFN contract
+  preregistered: true
+  primary_endpoint: fixed_epoch_6
+  diagnostic_endpoints: [fixed_epoch_1, fixed_epoch_2, fixed_epoch_3, fixed_epoch_4, fixed_epoch_5]
+  checkpoint_selection: fixed_epoch_6_only
+  expected_trainable_parameters: 624217
+
+model:
+  bfn:
+    steps: 4
+    coefficient_state_readout:
+      enabled: true
+      type: spatial_coefficient_flow
+      num_bases: 4
+      steps: 4
+      hidden_channels: 16
+      kernel_size: 3
+      basis_init: dct_orthogonal
+      basis_init_gain: 1.0
+      observation_activation: tanh
+      coefficient_activation: tanh
+      coefficient_range: [-1.0, 1.0]
+      normalization: inverse_sqrt_num_bases
+      zero_init_observer: true
+      update_mode: deterministic
+      min_variance: 0.01
+      accuracy_schedule: linear_beta
+      min_accuracy_scale: 0.25
+      target_ridge: 0.001
+      acceptance_gate:
+        enabled: false
+        type: posterior_spatial_sigmoid
+        condition: [context, posterior_mean, log_precision]
+        range: [0.0, 1.0]
+        initial_probability: 0.5
+
+loss:
+  bfn_weight: 0.00004
+
+training:
+  output_dir: runs/basisbfn/common_not_launchable
+  require_v27_preflight: false
+  v27_preflight_report: null
+  v27_profile_report: null
+  basisbfn_preflight_report: null
+  basisbfn_profile_report: null

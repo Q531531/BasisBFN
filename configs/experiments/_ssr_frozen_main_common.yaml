@@ -1,0 +1,159 @@
+_base_: ../ssr_bfn_5090.yaml
+
+# Frozen D/B protocol. This file remains launch-blocked until
+# scripts/freeze_frozen_main_budget.py emits standalone locked arm configs.
+seed: 42
+
+protocol:
+  name: frozen_main_db
+  expected_train_pairs: 18069
+  expected_dev_pairs: 903
+  checkpoint_selection: dev_y_psnr
+  latent_development_selection: linear_beta_plus_final_mean
+  latent_selection_caveat: z fitting better does not imply final restoration is better
+  official_test_locked: true
+  allowed_early_stops: [nan_or_inf, oom, throughput_deviation_gt_30_percent, epoch4_tripwire, explicit_crash]
+  tripwire:
+    epoch: 4
+    metric: dev_y_psnr
+    maximum_regression_db: 0.05
+    require_both_arms: true
+    use_b_minus_d: false
+    pause_after_epoch: true
+    evaluation_weights: ema
+    baseline_source: verified_frozen_ssr_dev_json
+  budget_policy:
+    requested_gpu_hours_per_arm: 10.0
+    minimum_epochs: 12
+    maximum_epochs: 30
+    hard_gpu_hour_cap_per_arm: 16.0
+    shared_epoch_rule: min_supported_across_D_and_B
+    ablations_reuse_main_epochs: true
+
+model:
+  core:
+    require_spectral_gate: true
+    require_iterative_bfn: true
+    require_entropy_mask: false
+    bfn_steps: 4
+  foundation:
+    frozen_modules_eval: true
+    trainable_modules:
+      - decoder_level1
+      - decoder_level2
+      - output
+    feature_adapters:
+      encoder_level3:
+        type: paper_spectral_gate
+        channels: 192
+        initial_gate: 0.999
+        trainable: true
+      decoder_level3:
+        type: latent_film_spectral
+        channels: 192
+        global_dim: 32
+        spatial_dim: 8
+        hidden_channels: 64
+        trainable: true
+      decoder_level2:
+        type: latent_film_spectral
+        channels: 96
+        global_dim: 32
+        spatial_dim: 8
+        hidden_channels: 64
+        trainable: true
+  bfn:
+    inference_mode: none
+    receiver_trainable: false
+    mask_mode: none
+  latent_bfn:
+    enabled: true
+    steps: 4
+    global_dim: 32
+    spatial_dim: 8
+    hidden_channels: 64
+    feature_channels: 192
+    num_categories: 3
+    spatial_downsample: 4
+    min_variance: 0.01
+    min_accuracy_scale: 0.25
+    target_residual_scale: 0.2
+    accuracy_schedule: linear_beta
+    loss_mode: final_mean
+    loss_weighting: adaptive_accuracy
+    adapter_precision_mode: belief
+    trainable: true
+    category_patterns:
+      snow: '.*\.jpe?g'
+      outdoor_rain: 'im_\d+_s\d+_a0[456]\.png'
+      raindrop: '\d+_rain\.png'
+
+data:
+  workers: 12
+  train:
+    input_dir: ${SGB_DATA_ROOT}/input
+    target_dir: ${SGB_DATA_ROOT}/gt
+    pairs_file: null
+    patch_size: 256
+    augment: true
+    strict: true
+  val:
+    input_dir: ${SGB_DATA_ROOT}/input
+    target_dir: ${SGB_DATA_ROOT}/gt
+    pairs_file: ${SGB_DATA_ROOT}/val_pairs.tsv
+    strict: true
+
+loss:
+  structural_weight: 1.0
+  bfn_weight: 0.0
+  final_weight: 0.0
+  correlation_weight: 0.0
+  frequency_weight: 0.0
+  adapter_weight: 0.0
+  uncertainty_weight: 0.0
+  latent_category_weight: 0.0
+  structural_loss_type: mse
+  final_loss_type: mse
+
+validation:
+  lpips: false
+  lpips_network: alex
+  crop_border: 0
+  test_y_channel: true
+
+training:
+  output_dir: runs/frozen_main/unlocked
+  epochs: 1
+  batch_size: 16
+  micro_batch_size: 4
+  learning_rate: 0.0002
+  parameter_lrs:
+    backbone.model.decoder_level1: 0.00002
+    backbone.model.decoder_level2: 0.00002
+    backbone.model.output: 0.00002
+  minimum_learning_rate: 0.000001
+  minimum_learning_rate_ratio: 0.1
+  warmup_epochs: 1
+  schedule_minimum_mode: per_group
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  ema_decay: 0.999
+  ema_warmup_updates: 2000
+  amp: true
+  amp_dtype: bfloat16
+  allow_tf32: true
+  cudnn_benchmark: true
+  reproducible_data: true
+  sampling:
+    mode: shuffle
+  validate_interval: 1
+  save_interval: 1
+  log_interval: 250
+  require_budget_lock: true
+  budget_locked: false
+  budget_manifest: null
+  budget_arm: null
+  stages:
+    - name: joint
+      epochs: 1

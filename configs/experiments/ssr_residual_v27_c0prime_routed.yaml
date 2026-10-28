@@ -1,0 +1,28 @@
+_base_: ssr_residual_v27_c0_proxy.yaml
+
+# Exploratory structural correction: replace only the shared residual readout.
+protocol:
+  name: residual_bfn_v27_exploratory
+  arm: C0-prime
+  arm_description: category-routed deterministic residual readout
+  preregistered: true
+  primary_endpoint: fixed_epoch_3
+  checkpoint_selection: fixed_epoch_3_only
+  expected_trainable_parameters: 615440
+
+model:
+  bfn:
+    routed_readout:
+      enabled: true
+      categories: [snow, outdoor_rain, raindrop]
+      router_type: global_average_linear
+      router_supervision: none
+      router_bias_init: uniform_log_probability
+      head_type: groupnorm_silu_conv3x3
+      head_symmetry_break_epsilon: 0.001
+      zero_init_output: true
+
+training:
+  output_dir: runs/residual_bfn_v27_exploratory/c0prime_routed
+  v27_preflight_report: runs/residual_bfn_v27_exploratory/preflight/preflight_c0prime.json
+  v27_profile_report: runs/residual_bfn_v27_exploratory/profiles/C0-prime.json

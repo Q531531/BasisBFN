@@ -1,0 +1,25 @@
+_base_: _ssr_residual_bfn_v27_common.yaml
+
+# Stage A0 capacity gate: one direct deterministic residual receiver call.
+protocol:
+  arm: C0
+  arm_description: parameter-matched direct deterministic residual head
+
+model:
+  bfn:
+    inference_mode: direct
+    update_mode: deterministic
+    readout_mode: receiver
+    steps: 1
+    training_rollout_steps: 1
+    rollout_backprop_steps: 1
+
+loss:
+  bfn_weight: 0.0
+
+training:
+  output_dir: runs/residual_bfn_v27/c0_proxy
+  v27_profile_report: runs/residual_bfn_v27/profiles/C0.json
+  stages:
+    - name: residual
+      epochs: 6

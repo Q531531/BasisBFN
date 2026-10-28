@@ -1,0 +1,17 @@
+_base_: _basisbfn_common.yaml
+
+protocol:
+  arm: B4-G
+  arm_description: four-step Bayesian coefficient fusion with posterior-conditioned acceptance gate
+
+model:
+  bfn:
+    coefficient_state_readout:
+      update_mode: bayesian
+      acceptance_gate:
+        enabled: true
+
+training:
+  output_dir: runs/basisbfn/b4-g
+  basisbfn_preflight_report: runs/basisbfn/preflight/preflight_b4-g.json
+  basisbfn_profile_report: runs/basisbfn/profiles/B4-G.json

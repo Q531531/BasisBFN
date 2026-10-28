@@ -1,0 +1,17 @@
+_base_: _ssr_frozen_main_common.yaml
+
+protocol:
+  arm: D
+  arm_description: deterministic iterative condition control
+
+model:
+  latent_bfn:
+    update_mode: deterministic
+
+loss:
+  bfn_weight: 0.01
+  latent_category_weight: 0.01
+
+training:
+  output_dir: runs/frozen_main/D
+  budget_arm: D

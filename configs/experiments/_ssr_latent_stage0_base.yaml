@@ -1,0 +1,97 @@
+_base_: ../ssr_bfn_5090.yaml
+
+# Shared Stage 0 protocol. This is a frozen-backbone causal probe on the
+# training-derived development split, not an official-test configuration.
+model:
+  core:
+    require_spectral_gate: false
+    require_iterative_bfn: true
+    require_entropy_mask: false
+    bfn_steps: 4
+  foundation:
+    frozen_modules_eval: true
+    trainable_modules: []
+    feature_adapters:
+      decoder_level3:
+        type: latent_film_spectral
+        channels: 192
+        global_dim: 32
+        spatial_dim: 8
+        hidden_channels: 64
+        trainable: true
+      decoder_level2:
+        type: latent_film_spectral
+        channels: 96
+        global_dim: 32
+        spatial_dim: 8
+        hidden_channels: 64
+        trainable: true
+  bfn:
+    inference_mode: none
+    receiver_trainable: false
+    mask_mode: none
+  latent_bfn:
+    enabled: true
+    steps: 4
+    global_dim: 32
+    spatial_dim: 8
+    hidden_channels: 64
+    feature_channels: 192
+    num_categories: 3
+    spatial_downsample: 4
+    min_variance: 0.01
+    min_accuracy_scale: 0.25
+    target_residual_scale: 0.2
+    category_patterns:
+      snow: '.*\.jpe?g'
+      outdoor_rain: 'im_\d+_s\d+_a0[456]\.png'
+      raindrop: '\d+_rain\.png'
+
+data:
+  workers: 12
+  train:
+    input_dir: ${SGB_DATA_ROOT}/input
+    target_dir: ${SGB_DATA_ROOT}/gt
+    pairs_file: ${SGB_DATA_ROOT}/train_pairs.tsv
+    patch_size: 256
+    augment: true
+    strict: true
+  val:
+    input_dir: ${SGB_DATA_ROOT}/input
+    target_dir: ${SGB_DATA_ROOT}/gt
+    pairs_file: ${SGB_DATA_ROOT}/val_pairs.tsv
+    strict: true
+
+loss:
+  structural_weight: 1.0
+  bfn_weight: 0.01
+  final_weight: 0.0
+  correlation_weight: 0.0
+  frequency_weight: 0.0
+  adapter_weight: 0.0
+  uncertainty_weight: 0.0
+  latent_category_weight: 0.01
+  structural_loss_type: mse
+  final_loss_type: mse
+
+validation:
+  lpips: false
+  lpips_network: alex
+  crop_border: 0
+  test_y_channel: true
+
+training:
+  epochs: 3
+  batch_size: 4
+  micro_batch_size: 2
+  learning_rate: 0.0002
+  minimum_learning_rate: 0.00002
+  warmup_epochs: 0
+  schedule_minimum_mode: per_group
+  reproducible_data: true
+  validate_interval: 1
+  save_interval: 1
+  log_interval: 250
+  stages:
+    - name: joint
+      epochs: 3

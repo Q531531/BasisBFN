@@ -1,0 +1,289 @@
+_base_: ../ssr_bfn_5090.yaml
+
+# #####################################################################
+# STATUS: SUPERSEDED BY configs/experiments/ssr_bfn_fullft_v26b.yaml
+# #####################################################################
+# This file is kept **unchanged on purpose** as the record of the failed first
+# attempt. Do not start new runs from it; use `ssr_bfn_fullft_v26b.yaml`
+# (30 epoch main line) or `ssr_bfn_fullft_v26b_proxy.yaml` (6 epoch decision
+# run). Two defects were measured on the 2-epoch pilot
+# (`ssr_bfn_fullft_v26_pilot.yaml`); full write-up in
+# docs/FULLFT_BFN_V26.md §"Pilot 实测结果与两处配置缺陷".
+#
+# 1. `micro_batch_size: 4` below **OOMs**. 【已测量，服务器 pilot】the training
+#    GPU has 23.41 GiB usable (not 32 GiB) and mb4 dies in the *first* forward
+#    pass at 256x256; `micro_batch_size: 2` runs stably. 【代码事实】
+#    `train.py:421-430` keeps the global batch at 16 by moving gradient
+#    accumulation 4 -> 8, so LR and schedule need no change.
+#
+# 2. The `loss:` block below puts only **46.1%** of the objective on pixel
+#    fidelity. 【代码事实】`losses.py:174-183` sums weighted terms while
+#    `losses.py:184-194` reports *unweighted* diagnostics, so the pilot log had
+#    to be re-weighted by hand. With the measured raw components
+#    (struct 0.00093 / bfn 0.04451 / freq 0.00944 / latent_cls 0.01701):
+#      struct 1.00 x 0.00093 = 9.300e-4 -> 46.1%
+#      freq   0.05 x 0.00944 = 4.720e-4 -> 23.4%
+#      bfn    0.01 x 0.04451 = 4.451e-4 -> 22.1%
+#      cls    0.01 x 0.01701 = 1.701e-4 ->  8.4%
+#      total                 = 2.0172e-3, matching the logged loss=0.00201 to
+#                               the 5-decimal display rounding (gap 7.2e-6)
+#    i.e. 53.9% of the gradient signal was not the quantity PSNR measures, and
+#    `frequency_weight: 0.05` acted as a co-equal second objective. v26b uses
+#    freq 0.01 / bfn 0.004 / cls 0.002, which raises the pixel share to 75.2%.
+#
+# 【已测量】pilot dev outcome (903 pairs, same environment): foundation
+# PSNR 34.76885 / SSIM 0.94353 vs pilot best_psnr.pt (best_epoch=2)
+# PSNR 34.68485 / SSIM 0.94330; paired bootstrap ΔPSNR -0.083995,
+# CI95 [-0.097263, -0.070903], improved 292/903. Note that this number is NOT
+# proof that the protocol degrades quality: 【代码事实】
+# `sgbformer/training.py:87-99` gives a decay factor of exactly 1.0 for both
+# pilot epochs, so the pilot never annealed at all.
+
+# =====================================================================
+# v26 main line: "keep BFN, release every other self-imposed constraint"
+# =====================================================================
+#
+# Why a new main line
+# -------------------
+# Every frozen-SSR family member measured so far is BELOW the reproduced
+# foundation macro PSNR 34.239638 / macro LPIPS 0.062147
+# (from archived adapter-only evaluations), including the 0.95M-parameter
+# frozen_main_db D/B arms. The only remaining paper-level hard requirement is
+# the Bayesian Flow Network conditioning path, so this protocol keeps latent
+# BFN and unfreezes everything else (full SSR fine-tuning, larger latent state,
+# category-balanced sampling, frequency loss).
+#
+# Gradient path: why `freeze: false` alone is sufficient
+# -----------------------------------------------------
+# sgbformer/models/foundation.py:301 runs `self.model.requires_grad_(not
+# freeze)`, so `freeze: false` makes every SSR parameter trainable and
+# foundation.py:304 then sets `foundation_trainable = True`.
+# foundation.py:475 selects `nullcontext()` instead of `torch.no_grad()`
+# exactly when `foundation_trainable` is true, therefore the cached prefix
+# (patch_embed -> encoder_level1..3 -> decoder_level3) keeps its autograd
+# graph and the encoder plus decoder_level3 base weights really do receive
+# gradients. The latent training step (model.py:1014 latent_training_outputs
+# -> model.py:619 cache_decoder_prefix -> model.py:710
+# decode_from_cached_decoder3) contains no no_grad block, and
+# model.py:1072-1076 sets restored == structural == foundation, so
+# `loss.structural_weight` supervises the modulated full-graph output.
+# No source change is needed for end-to-end joint training.
+#
+# Why the latent adapters CANNOT be extended to decoder_level1
+# ------------------------------------------------------------
+# foundation.py:451-462 (`supports_latent_cache`) only returns True when the
+# latent_film_spectral adapters are a subset of {decoder_level3,
+# decoder_level2} and decoder_level3 is present. model.py:249-253 raises
+# "latent_bfn requires decoder_level3 and decoder_level2 latent_film_spectral
+# adapters on a split-capable SSR" otherwise. Adding decoder_level1 would
+# therefore crash at model construction, and relaxing it would require
+# editing sgbformer/**, which is forbidden (see below).
+#
+# Why not a single line of sgbformer/** or train.py was changed
+# ------------------------------------------------------------
+# sgbformer/protocol.py:54-80 (`implementation_fingerprint`) hashes every
+# sgbformer/**/*.py plus train.py and four scripts/*frozen_main* files, and
+# protocol.py:518-526 raises "Frozen-main implementation SHA256 mismatch"
+# when a locked D/B arm resumes. The currently running frozen_main_db
+# training would be destroyed by any edit, so this protocol is expressed
+# purely through new config files.
+#
+# Lock avoidance: `protocol.name` is deliberately NOT frozen_main_db, which
+# is the single condition that activates validate_frozen_main_contract
+# (train.py:324-325), the 18069/903/1130-step asserts (train.py:377,460,470)
+# and the SHA256 gate. `training.require_budget_lock: false` makes
+# validate_budget_lock return None immediately (protocol.py:319-321), so no
+# budget manifest, profiler or preflight artefact is required.
+
+seed: 42
+
+protocol:
+  name: fullft_bfn_v26
+  description: >-
+    Full SSR fine-tuning with the latent BFN conditioning path retained.
+    Judged against the reproduced foundation macro PSNR 34.239638.
+  reference_macro_psnr: 34.239638
+  # No tripwire: this protocol is not budget-locked and not preregistered.
+  tripwire: null
+
+model:
+  core:
+    require_spectral_gate: true
+    require_iterative_bfn: true
+    require_entropy_mask: false
+    # Must equal latent_bfn.steps: model.py:344 overwrites bfn_steps with
+    # latent_steps and model.py:363-368 compares the two.
+    bfn_steps: 4
+  foundation:
+    # The core change: the whole SSR backbone is trainable.
+    freeze: false
+    frozen_modules_eval: false
+    trainable_modules: []
+    strict_load: true
+    feature_adapters:
+      encoder_level3:
+        type: paper_spectral_gate
+        channels: 192
+        initial_gate: 0.999
+        trainable: true
+      decoder_level3:
+        type: latent_film_spectral
+        channels: 192
+        global_dim: 64
+        spatial_dim: 16
+        hidden_channels: 128
+        trainable: true
+      decoder_level2:
+        type: latent_film_spectral
+        channels: 96
+        global_dim: 64
+        spatial_dim: 16
+        hidden_channels: 128
+        trainable: true
+  bfn:
+    # The RGB receiver is unused on the latent path. Keeping inference_mode
+    # none prevents model.py:184-204 from building a ResidualReceiver whose
+    # parameters would never receive gradients (model.py:345 restores
+    # refinement_mode=iterative for the latent flow afterwards).
+    inference_mode: none
+    receiver_trainable: false
+    mask_mode: none
+  latent_bfn:
+    enabled: true
+    steps: 4
+    # global_dim/spatial_dim/hidden_channels must match both latent adapters.
+    global_dim: 64
+    spatial_dim: 16
+    hidden_channels: 128
+    feature_channels: 192
+    num_categories: 3
+    spatial_downsample: 4
+    min_variance: 0.01
+    min_accuracy_scale: 0.25
+    target_residual_scale: 0.2
+    update_mode: bayesian
+    accuracy_schedule: linear_beta
+    loss_mode: final_mean
+    loss_weighting: adaptive_accuracy
+    adapter_precision_mode: belief
+    trainable: true
+    category_patterns:
+      snow: '.*\.jpe?g'
+      outdoor_rain: 'im_\d+_s\d+_a0[456]\.png'
+      raindrop: '\d+_rain\.png'
+
+loss:
+  structural_weight: 1.0
+  structural_loss_type: mse
+  # losses.py:150-154 applies frequency_amplitude_loss to outputs["structural"],
+  # which is the modulated restoration on the latent path.
+  frequency_weight: 0.05
+  bfn_weight: 0.01
+  latent_category_weight: 0.01
+  final_weight: 0.0
+  correlation_weight: 0.0
+  adapter_weight: 0.0
+  uncertainty_weight: 0.0
+  final_loss_type: mse
+
+data:
+  workers: 12
+  train:
+    input_dir: ${SGB_DATA_ROOT}/input
+    target_dir: ${SGB_DATA_ROOT}/gt
+    # Dev holdout is MANDATORY here, unlike frozen-main.
+    # frozen_main_db uses `pairs_file: null`, i.e. a full 18069-pair directory
+    # scan, while dev (val_pairs.tsv, 903 pairs) is a 5% random subset of those
+    # same 18069 pairs (scripts/create_split_manifest.py). With only 0.95M
+    # trainable parameters that leak was tolerable; with ~11.3M trainable
+    # parameters over 30 epochs the dev curve would simply track memorisation
+    # and checkpoint_selection / overfitting monitoring would become useless.
+    # Therefore v26 trains on the 95% split (about 17166 pairs) and keeps the
+    # 903 dev pairs out of the training stream.
+    #
+    # Caveat to report honestly: the SSR initialisation was itself pretrained
+    # on all 18069 pairs, so dev is not a clean held-out set at the weight
+    # level either. It only guarantees that *this* fine-tuning run does not
+    # additionally memorise those 903 images, which is exactly the signal we
+    # need to detect full-unfreeze degradation.
+    #
+    # Precondition: ${SGB_DATA_ROOT}/train_pairs.tsv must exist. Regenerate it
+    # with scripts/create_split_manifest.py if missing, and check
+    # `wc -l ${SGB_DATA_ROOT}/train_pairs.tsv` is about 17166.
+    pairs_file: ${SGB_DATA_ROOT}/train_pairs.tsv
+    patch_size: 256
+    augment: true
+    strict: true
+  val:
+    input_dir: ${SGB_DATA_ROOT}/input
+    target_dir: ${SGB_DATA_ROOT}/gt
+    pairs_file: ${SGB_DATA_ROOT}/val_pairs.tsv
+    strict: true
+
+validation:
+  lpips: false
+  lpips_network: alex
+  crop_border: 0
+  test_y_channel: true
+
+training:
+  output_dir: runs/fullft_v26/main
+  epochs: 30
+  stages:
+    # resolve_training_stages (sgbformer/training.py:49-52) requires the stage
+    # epochs to sum to training.epochs, and model.py:1254-1258 requires the
+    # latent path to run in the joint stage.
+    - name: joint
+      epochs: 30
+  batch_size: 16
+  micro_batch_size: 4
+  # New modules (latent BFN, adapters) at 2e-4; the pretrained SSR backbone at
+  # 1.5e-5. build_optimizer (train.py:110-117) takes the longest matching
+  # prefix, and "backbone.model" covers the entire external SSR.
+  learning_rate: 0.0002
+  parameter_lrs:
+    backbone.model: 0.000015
+  warmup_epochs: 1
+  minimum_learning_rate: 0.000001
+  minimum_learning_rate_ratio: 0.1
+  schedule_minimum_mode: per_group
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  betas: [0.9, 0.999]
+  ema_decay: 0.999
+  ema_warmup_updates: 2000
+  amp: true
+  amp_dtype: bfloat16
+  allow_tf32: true
+  cudnn_benchmark: true
+  reproducible_data: true
+  validate_interval: 1
+  save_interval: 1
+  log_interval: 250
+  require_budget_lock: false
+  # Category-balanced mixture matching the official four-set macro
+  # (Snow 0.50 / Outdoor-Rain 0.25 / RainDrop 0.25). Key names and value
+  # formats follow train.py:384-405 and sgbformer/data/samplers.py:15-102.
+  #
+  # `expected_counts` is intentionally omitted: samplers.py:39-45 only runs the
+  # equality assert when it is present, and the 95% split counts are derived
+  # from a random shuffle, so hard-coding them would break whenever the split
+  # manifest is regenerated. The realised per-category counts are still logged
+  # every run (train.py:633-641, `sampling_source_counts` /
+  # `sampling_epoch_targets`) - record those lines in the run log instead.
+  #
+  # Oversampling note: RainDrop has only about 777 pairs in the 95% split but
+  # receives 25% of a 17166-sample epoch, i.e. roughly 5.5x repetition per
+  # epoch. samplers.py:107-118 reshuffles on every refill and the draw id is fed
+  # into the augmentation seed (samplers.py:50-53), so repeats get different
+  # crops. Still, watch for RainDrop-specific overfitting in the dev curve.
+  sampling:
+    mode: category_balanced
+    category_patterns:
+      snow: '.*\.jpe?g'
+      outdoor_rain: 'im_\d+_s\d+_a0[456]\.png'
+      raindrop: '\d+_rain\.png'
+    target_fractions:
+      snow: 0.50
+      outdoor_rain: 0.25
+      raindrop: 0.25

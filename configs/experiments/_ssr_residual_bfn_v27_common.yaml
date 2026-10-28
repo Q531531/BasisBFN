@@ -1,0 +1,124 @@
+_base_: ../ssr_bfn_5090.yaml
+
+# Shared, non-launchable v27 residual-refinement contract.
+seed: 42
+
+protocol:
+  name: residual_bfn_v27
+  arm: common
+  expected_train_pairs: 17166
+  expected_dev_pairs: 903
+  checkpoint_selection: fixed_epoch_6_primary_macro_best_secondary
+  official_test_locked: true
+  long_training_locked: true
+  expected_trainable_parameters: 614455
+
+model:
+  core:
+    require_spectral_gate: false
+    require_iterative_bfn: false
+    require_entropy_mask: false
+  semantic:
+    encoder: none
+    embedding_dim: 1
+    context_tokens: 1
+  foundation:
+    freeze: true
+    frozen_modules_eval: true
+    trainable_modules: []
+    feature_adapters: {}
+    strict_load: true
+  mean_correction:
+    enabled: false
+  latent_bfn:
+    enabled: false
+  bfn:
+    inference_mode: direct
+    receiver_type: unet
+    receiver_trainable: true
+    condition_mode: observation_rich
+    receiver_output_mode: identity
+    update_mode: deterministic
+    readout_mode: receiver
+    residual_base_clamp: true
+    steps: 1
+    residual_scale: 0.2
+    min_variance: 0.01
+    accuracy_schedule: linear_beta
+    mask_mode: none
+    min_accuracy_scale: 1.0
+    base_channels: 16
+    channel_multipliers: [1, 2, 4]
+    blocks_per_level: 2
+    attention_heads: 4
+    dropout: 0.0
+    training_final_state: rollout
+    training_rollout_steps: 1
+    rollout_backprop_steps: 1
+    rollout_batch_fraction: 1.0
+
+loss:
+  structural_weight: 0.0
+  structural_loss_type: mse
+  final_weight: 1.0
+  final_loss_type: mse
+  bfn_weight: 0.0
+  frequency_weight: 0.0
+  correlation_weight: 0.0
+  adapter_weight: 0.0
+  uncertainty_weight: 0.0
+  latent_category_weight: 0.0
+
+data:
+  workers: 12
+  train:
+    input_dir: ${SGB_DATA_ROOT}/input
+    target_dir: ${SGB_DATA_ROOT}/gt
+    pairs_file: ${SGB_DATA_ROOT}/train_pairs.tsv
+    patch_size: 256
+    augment: true
+    strict: true
+  val:
+    input_dir: ${SGB_DATA_ROOT}/input
+    target_dir: ${SGB_DATA_ROOT}/gt
+    pairs_file: ${SGB_DATA_ROOT}/val_pairs.tsv
+    strict: true
+
+validation:
+  lpips: false
+  lpips_network: alex
+  crop_border: 0
+  test_y_channel: true
+
+training:
+  output_dir: runs/residual_bfn_v27/common_not_launchable
+  epochs: 6
+  stages:
+    - name: residual
+      epochs: 6
+  batch_size: 16
+  micro_batch_size: 2
+  learning_rate: 0.0002
+  minimum_learning_rate: 0.000001
+  minimum_learning_rate_ratio: 0.1
+  schedule_minimum_mode: per_group
+  warmup_epochs: 1
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  ema_decay: 0.999
+  ema_warmup_updates: 2000
+  amp: true
+  amp_dtype: bfloat16
+  allow_tf32: true
+  cudnn_benchmark: true
+  reproducible_data: true
+  sampling:
+    mode: shuffle
+  validate_interval: 1
+  save_interval: 1
+  log_interval: 250
+  require_budget_lock: false
+  require_v27_preflight: true
+  v27_preflight_report: runs/residual_bfn_v27/preflight/preflight.json
+  v27_profile_report: null

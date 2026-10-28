@@ -1,0 +1,15 @@
+_base_: _basisbfn_common.yaml
+
+protocol:
+  arm: B4
+  arm_description: four-step Bayesian coefficient fusion without gate
+
+model:
+  bfn:
+    coefficient_state_readout:
+      update_mode: bayesian
+
+training:
+  output_dir: runs/basisbfn/b4
+  basisbfn_preflight_report: runs/basisbfn/preflight/preflight_b4.json
+  basisbfn_profile_report: runs/basisbfn/profiles/B4.json

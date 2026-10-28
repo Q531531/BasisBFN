@@ -1,0 +1,40 @@
+_base_: ssr_bfn_fullft_v26b_proxy.yaml
+
+# =====================================================================
+# v26d low-backbone-LR proxy: isolate full-unfreeze adaptation strength
+# =====================================================================
+#
+# v26c directly compared deterministic shuffle with v26b category-balanced
+# sampling at matched epochs:
+#
+#   epoch 5 macro delta (v26c - v26b):
+#     +0.001010, CI95 [-0.010259, +0.011473]
+#   epoch 6 macro delta (v26c - v26b):
+#     -0.002325, CI95 [-0.012156, +0.006477]
+#
+# Both intervals cover zero, so sampling mode has no detected effect on the
+# target macro metric. The next causal question is whether the fully unfrozen
+# SSR backbone is adapting too aggressively.
+#
+# This proxy returns to the v26b category-balanced recipe and changes one
+# behavioral value only:
+#   backbone.model LR: 1.5e-5 -> 5e-6.
+#
+# Everything else is inherited unchanged from v26b proxy:
+#   * six epochs, warmup 1, cosine minimum ratio 0.1;
+#   * new-module LR 2e-4;
+#   * full SSR unfreeze and the same 11,287,509 trainable parameters;
+#   * structural/frequency/BFN/category weights 1.0/0.01/0.004/0.002;
+#   * category-balanced 0.50/0.25/0.25 sampling;
+#   * latent BFN steps 4 with Bayesian updates;
+#   * micro batch 2, global batch 16, seed 42;
+#   * the same 17166 train / 903 held-out dev manifests.
+#
+# With the unchanged six-epoch schedule, the final backbone LR is
+# 5e-6 * 0.185942 = 9.2971e-7. The new-module group follows its original
+# 2e-4 schedule and is not changed.
+
+training:
+  output_dir: runs/fullft_v26d/lrlow_proxy
+  parameter_lrs:
+    backbone.model: 0.000005

@@ -1,0 +1,24 @@
+_base_: sgbformer.yaml
+
+# Set SGB_DATA_ROOT to the directory containing input/ and gt/. Generate the
+# two manifests once with scripts/create_split_manifest.py.
+data:
+  workers: 12
+  train:
+    input_dir: ${SGB_DATA_ROOT}/input
+    target_dir: ${SGB_DATA_ROOT}/gt
+    pairs_file: ${SGB_DATA_ROOT}/train_pairs.tsv
+    patch_size: 128
+    augment: true
+    strict: true
+  val:
+    input_dir: ${SGB_DATA_ROOT}/input
+    target_dir: ${SGB_DATA_ROOT}/gt
+    pairs_file: ${SGB_DATA_ROOT}/val_pairs.tsv
+    strict: true
+
+training:
+  output_dir: runs/sgbformer_5090
+  # One 5090: 4 images x 4 accumulation steps = global batch 16.
+  # Four GPUs: 4 images x 4 GPUs = global batch 16, no accumulation.
+  micro_batch_size: 4

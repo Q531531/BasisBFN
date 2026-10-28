@@ -1,0 +1,20 @@
+_base_: ssr_frozen_ablation_a0.yaml
+
+protocol:
+  arm: A1
+  arm_description: trainable SSR suffix plus paper spectral gate
+
+model:
+  core:
+    require_spectral_gate: true
+  foundation:
+    feature_adapters:
+      encoder_level3:
+        type: paper_spectral_gate
+        channels: 192
+        initial_gate: 0.999
+        trainable: true
+
+training:
+  output_dir: runs/frozen_ablation/A1
+  budget_arm: A1

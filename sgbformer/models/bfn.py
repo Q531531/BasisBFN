@@ -1,304 +1,620 @@
+"""Continuous Gaussian Bayesian flow utilities for residual refinement."""
 
+from __future__ import annotations
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import math
 
+import torch
+from torch import Tensor, nn
+from torch.nn import functional as F
 
-class BayesianFlowNetwork(nn.Module):
-    """
-    Bayesian Flow Network for residual refinement.
-    
-    This implements the BFN framework described in Eq 6-10 of the paper.
-    The key insight is to model the residual generation as a parameter space
-    evolution rather than pixel space denoising, enabling faster convergence.
-    """
-    
-    def __init__(self, feature_dim, num_steps=10, time_embedding_dim=64):
-        """
-        Args:
-            feature_dim (int): Dimension of input features from backbone
-            num_steps (int): Number of BFN refinement steps (default: 10)
-            time_embedding_dim (int): Dimension of time embeddings
-        """
+
+@torch.no_grad()
+def local_entropy_map(
+    image: Tensor,
+    kernel_size: int = 9,
+    bins: int = 16,
+) -> Tensor:
+    """Compute a normalized local Shannon entropy map in [0, 1]."""
+
+    if image.ndim != 4:
+        raise ValueError("Expected image in BCHW format")
+    if kernel_size % 2 == 0:
+        raise ValueError("kernel_size must be odd")
+    if bins < 2:
+        raise ValueError("bins must be at least two")
+
+    if image.shape[1] == 3:
+        weights = image.new_tensor((0.299, 0.587, 0.114))[None, :, None, None]
+        gray = (image.clamp(0, 1) * weights).sum(dim=1)
+    else:
+        gray = image.clamp(0, 1).mean(dim=1)
+
+    indices = torch.round(gray * (bins - 1)).long()
+    one_hot = F.one_hot(indices, num_classes=bins).permute(0, 3, 1, 2).float()
+    padding = kernel_size // 2
+    pad_mode = (
+        "reflect"
+        if min(image.shape[-2:]) > padding
+        else "replicate"
+    )
+    one_hot = F.pad(one_hot, (padding, padding, padding, padding), mode=pad_mode)
+    probabilities = F.avg_pool2d(one_hot, kernel_size, stride=1)
+    entropy = -(
+        probabilities * probabilities.clamp_min(1e-8).log()
+    ).sum(dim=1, keepdim=True)
+    return entropy / math.log(bins)
+
+
+class ResidualBayesianFlow(nn.Module):
+    """Gaussian BFN schedule and closed-form Bayesian parameter updates."""
+
+    def __init__(
+        self,
+        min_variance: float = 1e-4,
+        accuracy_schedule: str = "exponential",
+        entropy_kernel: int = 9,
+        entropy_bins: int = 16,
+        entropy_threshold: float = 0.25,
+        min_accuracy_scale: float = 0.25,
+    ) -> None:
         super().__init__()
-        
-        self.num_steps = num_steps
-        self.time_embedding_dim = time_embedding_dim
-        
-        # Time embedding network for step conditioning
-        self.time_mlp = nn.Sequential(
-            nn.Linear(1, time_embedding_dim),
+        if not 0.0 < min_variance < 1.0:
+            raise ValueError("min_variance must lie in (0, 1)")
+        if not 0.0 <= entropy_threshold <= 1.0:
+            raise ValueError("entropy_threshold must lie in [0, 1]")
+        if accuracy_schedule not in {
+            "exponential",
+            "linear_beta",
+            "equal_alpha",
+        }:
+            raise ValueError(
+                "accuracy_schedule must be exponential, linear_beta, "
+                "or equal_alpha"
+            )
+        self.min_variance = float(min_variance)
+        self.accuracy_schedule = accuracy_schedule
+        self.entropy_kernel = int(entropy_kernel)
+        self.entropy_bins = int(entropy_bins)
+        self.entropy_threshold = float(entropy_threshold)
+        self.min_accuracy_scale = float(min_accuracy_scale)
+
+    def cumulative_accuracy(self, time: Tensor) -> Tensor:
+        """Return cumulative accuracy for the configured schedule."""
+
+        min_variance = torch.as_tensor(
+            self.min_variance, device=time.device, dtype=time.dtype
+        )
+        if self.accuracy_schedule in {"linear_beta", "equal_alpha"}:
+            return time * (min_variance.reciprocal() - 1.0)
+        return min_variance.pow(-time) - 1.0
+
+    def step_accuracy(
+        self,
+        step: int | Tensor,
+        num_steps: int,
+        *,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> Tensor:
+        """Discrete accuracy alpha_i from the official continuous-data BFN."""
+
+        if num_steps < 1:
+            raise ValueError("num_steps must be positive")
+        step_tensor = torch.as_tensor(step, device=device, dtype=dtype or torch.float32)
+        if self.accuracy_schedule in {"linear_beta", "equal_alpha"}:
+            min_variance = torch.as_tensor(
+                self.min_variance,
+                device=step_tensor.device,
+                dtype=step_tensor.dtype,
+            )
+            return (min_variance.reciprocal() - 1.0) / num_steps
+        current = self.cumulative_accuracy(step_tensor / num_steps)
+        previous = self.cumulative_accuracy(
+            (step_tensor - 1.0) / num_steps
+        )
+        return current - previous
+
+    def spatial_schedule(self, structural: Tensor) -> tuple[Tensor, Tensor]:
+        """Return the binary active mask and adaptive accuracy scale."""
+
+        entropy = local_entropy_map(
+            structural.detach().clamp(0, 1),
+            kernel_size=self.entropy_kernel,
+            bins=self.entropy_bins,
+        )
+        mask = (entropy > self.entropy_threshold).to(structural.dtype)
+        scale = mask * (
+            self.min_accuracy_scale
+            + (1.0 - self.min_accuracy_scale) * entropy.to(structural.dtype)
+        )
+        return mask, scale
+
+    def sender_state(
+        self,
+        residual: Tensor,
+        time: Tensor,
+        accuracy_scale: Tensor,
+        noise: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Sample (mu_t, rho_t) directly from the accumulated sender flow."""
+
+        if time.ndim != 1 or time.shape[0] != residual.shape[0]:
+            raise ValueError("time must have shape [batch]")
+        beta = self.cumulative_accuracy(time).view(-1, 1, 1, 1)
+        beta = beta * accuracy_scale
+        precision = 1.0 + beta
+        if noise is None:
+            noise = torch.randn_like(residual)
+        mean = (beta * residual + beta.clamp_min(0).sqrt() * noise) / precision
+        return mean, precision
+
+    @staticmethod
+    def bayesian_update(
+        mean: Tensor,
+        precision: Tensor,
+        observation: Tensor,
+        accuracy: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        new_precision = precision + accuracy
+        new_mean = (
+            precision * mean + accuracy * observation
+        ) / new_precision.clamp_min(1e-8)
+        return new_mean, new_precision
+
+    @staticmethod
+    def uncertainty(precision: Tensor) -> Tensor:
+        return precision.reciprocal()
+
+    def discrete_loss(
+        self,
+        prediction: Tensor,
+        target: Tensor,
+        step: Tensor,
+        num_steps: int,
+        accuracy_scale: Tensor,
+    ) -> Tensor:
+        """Equation (11), estimated with one random discrete step per item."""
+
+        prediction = prediction.float()
+        target = target.float()
+        accuracy_scale = accuracy_scale.float()
+        alpha = self.step_accuracy(
+            step,
+            num_steps,
+            device=prediction.device,
+            dtype=torch.float32,
+        ).view(-1, 1, 1, 1)
+        alpha = alpha * accuracy_scale
+        weighted_error = 0.5 * num_steps * alpha * (target - prediction).square()
+        active_values = (accuracy_scale > 0).sum() * prediction.shape[1]
+        return weighted_error.sum() / active_values.clamp_min(1)
+
+
+def degradation_latent_targets(
+    degraded: Tensor,
+    target: Tensor,
+    *,
+    global_dim: int,
+    spatial_dim: int,
+    spatial_size: tuple[int, int],
+    category: Tensor | None,
+    num_categories: int,
+    residual_scale: float = 0.2,
+) -> tuple[Tensor, Tensor]:
+    """Build fixed global and coarse spatial degradation descriptors."""
+
+    if global_dim < num_categories + 2:
+        raise ValueError("global_dim is too small for category and severity targets")
+    if spatial_dim < 1 or residual_scale <= 0:
+        raise ValueError("spatial_dim and residual_scale must be positive")
+    residual = (degraded.float() - target.float()).detach()
+    absolute = residual.abs()
+    gray = residual.mean(dim=1, keepdim=True)
+    gray_absolute = gray.abs()
+
+    global_target = residual.new_zeros((residual.shape[0], global_dim))
+    if category is not None:
+        one_hot = F.one_hot(
+            category.long(),
+            num_classes=num_categories,
+        ).to(global_target.dtype)
+        global_target[:, :num_categories] = one_hot
+    severity = residual.square().mean(dim=(1, 2, 3)).sqrt()
+    global_target[:, num_categories] = (
+        severity / residual_scale
+    ).clamp(0, 1)
+
+    spectral_slots = global_dim - num_categories - 1
+    spectrum = torch.fft.rfft2(gray, norm="ortho").abs().log1p()
+    spectral = F.adaptive_avg_pool2d(
+        spectrum,
+        (1, spectral_slots),
+    ).flatten(1)
+    spectral = spectral / spectral.amax(dim=1, keepdim=True).clamp_min(1e-6)
+    global_target[:, num_categories + 1 :] = spectral
+
+    gradient_x = F.pad(
+        (gray[..., 1:] - gray[..., :-1]).abs(),
+        (0, 1, 0, 0),
+    )
+    gradient_y = F.pad(
+        (gray[..., 1:, :] - gray[..., :-1, :]).abs(),
+        (0, 0, 0, 1),
+    )
+    lowpass = F.avg_pool2d(gray_absolute, 5, stride=1, padding=2)
+    highpass = (gray_absolute - lowpass).abs()
+    spatial_basis = torch.cat(
+        (
+            absolute,
+            gray_absolute,
+            gradient_x,
+            gradient_y,
+            lowpass,
+            highpass,
+        ),
+        dim=1,
+    )
+    if spatial_basis.shape[1] < spatial_dim:
+        repeats = math.ceil(spatial_dim / spatial_basis.shape[1])
+        spatial_basis = spatial_basis.repeat(1, repeats, 1, 1)
+    spatial_target = F.adaptive_avg_pool2d(
+        spatial_basis[:, :spatial_dim],
+        spatial_size,
+    )
+    spatial_target = (spatial_target / residual_scale).clamp(0, 1)
+    return global_target.detach(), spatial_target.detach()
+
+
+class DegradationEvidenceEncoder(nn.Module):
+    """Encode one cached SSR prefix feature for lightweight latent inference."""
+
+    def __init__(
+        self,
+        feature_channels: int,
+        hidden_channels: int,
+    ) -> None:
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Conv2d(feature_channels, hidden_channels, 1),
             nn.SiLU(),
-            nn.Linear(time_embedding_dim, time_embedding_dim)
+            nn.Conv2d(
+                hidden_channels,
+                hidden_channels,
+                3,
+                padding=1,
+                groups=hidden_channels,
+            ),
+            nn.SiLU(),
         )
-        
-        # Receiver network - lightweight denoising architecture
-        self.receiver = ReceiverNetwork(
-            in_channels=3,  # RGB residual
-            feature_dim=feature_dim,
-            time_dim=time_embedding_dim
+
+    def forward(self, feature: Tensor) -> Tensor:
+        return self.layers(feature)
+
+
+class DegradationLatentBFN(nn.Module):
+    """Matched iterative flow over global and coarse spatial degradation."""
+
+    def __init__(
+        self,
+        feature_channels: int,
+        global_dim: int = 32,
+        spatial_dim: int = 8,
+        hidden_channels: int = 64,
+        num_categories: int = 3,
+        min_variance: float = 0.01,
+        min_accuracy_scale: float = 0.25,
+        spatial_downsample: int = 4,
+        accuracy_schedule: str = "exponential",
+        loss_mode: str = "all_observations",
+        update_mode: str = "bayesian",
+        loss_weighting: str = "none",
+    ) -> None:
+        super().__init__()
+        if min(feature_channels, global_dim, spatial_dim, hidden_channels) < 1:
+            raise ValueError("Latent BFN dimensions must be positive")
+        if num_categories < 2 or global_dim <= num_categories:
+            raise ValueError("global_dim must exceed num_categories")
+        if not 0.0 < min_accuracy_scale <= 1.0:
+            raise ValueError("min_accuracy_scale must lie in (0, 1]")
+        if spatial_downsample < 1:
+            raise ValueError("spatial_downsample must be positive")
+        if loss_mode not in {"all_observations", "final_mean"}:
+            raise ValueError(
+                "loss_mode must be all_observations or final_mean"
+            )
+        if update_mode not in {"bayesian", "deterministic"}:
+            raise ValueError(
+                "update_mode must be bayesian or deterministic"
+            )
+        if loss_weighting not in {"none", "adaptive_accuracy"}:
+            raise ValueError(
+                "loss_weighting must be none or adaptive_accuracy"
+            )
+        self.global_dim = int(global_dim)
+        self.spatial_dim = int(spatial_dim)
+        self.num_categories = int(num_categories)
+        self.min_accuracy_scale = float(min_accuracy_scale)
+        self.spatial_downsample = int(spatial_downsample)
+        self.loss_mode = loss_mode
+        self.update_mode = update_mode
+        self.loss_weighting = loss_weighting
+        self.flow = ResidualBayesianFlow(
+            min_variance=min_variance,
+            accuracy_schedule=accuracy_schedule,
         )
-        
-        # Learnable precision schedule (can be optimized during training)
-        # Corresponds to α(t) in Eq 8 of the paper
-        # Modern 2026 approach: use more stable initialization to prevent NaN
-        self.precision_schedule = nn.Parameter(
-            torch.linspace(0.1, 0.9, num_steps)  # More conservative range to prevent instability
+
+        self.degradation_encoder = DegradationEvidenceEncoder(
+            feature_channels,
+            hidden_channels,
         )
-        
-    def sender_process(self, residual_gt, step_idx):
-        """
-        Sender process implementing discretized Bayesian update (Eq 8-9).
-        
-        This simulates the information accumulation process where precision
-        increases over time and the mean estimate approaches ground truth.
-        
-        Args:
-            residual_gt (Tensor): Ground truth residual [B, 3, H, W]
-            step_idx (int): Current timestep index
-            
-        Returns:
-            tuple: (noisy_mean, precision) at current timestep
-        """
-        # Get precision at current step (α_t in the paper)
-        alpha_t = self.precision_schedule[step_idx]
-        
-        # Bayesian update rule from Eq 8
-        # μ_t = α_t * r_gt + √(1-α_t) * ε, where ε ~ N(0,I)
-        # Modern 2026 approach: add numerical stability and gradient clipping
-        noise = torch.randn_like(residual_gt)
-        alpha_t_clamped = torch.clamp(alpha_t, min=0.1, max=0.9)  # Prevent extreme values
-        
-        # Stable computation to prevent NaN
-        sqrt_term = torch.sqrt(torch.clamp(1 - alpha_t_clamped, min=1e-8))
-        noisy_mean = alpha_t_clamped * residual_gt + sqrt_term * noise * 0.1  # Scale noise down
-        
-        # Precision increases over time (Eq 9)
-        precision = alpha_t
-        
-        return noisy_mean, precision
-        
-    def receiver_process(self, noisy_mean, timestep, condition):
-        """
-        Receiver process for estimating clean residual.
-        
-        This implements the denoising function Ψ described in Eq 10,
-        which takes noisy observations and predicts the clean residual.
-        
-        Args:
-            noisy_mean (Tensor): Current noisy estimate [B, 3, H, W] 
-            timestep (Tensor): Current timestep [B]
-            condition (Tensor): Conditioning features from backbone [B, C, H, W]
-            
-        Returns:
-            Tensor: Predicted clean residual [B, 3, H, W]
-        """
-        # Embed timestep
-        t_emb = self.time_mlp(timestep.float().unsqueeze(-1))
-        
-        # Receiver network prediction
-        predicted_residual = self.receiver(noisy_mean, t_emb, condition)
-        
-        return predicted_residual
-        
-    def forward(self, condition, residual_gt=None, num_inference_steps=None):
-        """
-        Forward pass supporting both training and inference modes.
-        
-        Training mode: Single-step denoising loss computation
-        Inference mode: Iterative refinement over multiple steps
-        
-        Args:
-            condition (Tensor): Backbone features [B, C, H, W]
-            residual_gt (Tensor, optional): Ground truth residual for training
-            num_inference_steps (int, optional): Override number of inference steps
-            
-        Returns:
-            Tensor: Refined residual [B, 3, H, W]
-        """
-        B, C, H, W = condition.shape
-        device = condition.device
-        
-        if self.training and residual_gt is not None:
-            # Training mode: random timestep sampling
-            step_idx = torch.randint(0, self.num_steps, (1,), device=device).item()
-            timestep = torch.full((B,), step_idx / self.num_steps, device=device)
-            
-            # Apply sender process
-            noisy_mean, precision = self.sender_process(residual_gt, step_idx)
-            
-            # Predict clean residual
-            predicted_residual = self.receiver_process(noisy_mean, timestep, condition)
-            
-            return predicted_residual, precision
-            
-        else:
-            # Inference mode: iterative refinement
-            steps = num_inference_steps or self.num_steps
-            
-            # Initialize from prior: μ₀ = 0 (Eq 7)
-            current_mean = torch.zeros(B, 3, H, W, device=device)
-            
-            for step in range(steps):
-                timestep = torch.full((B,), step / steps, device=device)
-                
-                # Receiver prediction at current step
-                predicted_residual = self.receiver_process(
-                    current_mean, timestep, condition
+        self.global_context = nn.Sequential(
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.SiLU(),
+        )
+        self.spatial_context = nn.Sequential(
+            nn.Conv2d(hidden_channels, hidden_channels, 1),
+            nn.SiLU(),
+        )
+        self.global_observer = nn.Sequential(
+            nn.Linear(
+                hidden_channels + global_dim * 2 + 1,
+                hidden_channels,
+            ),
+            nn.SiLU(),
+            nn.Linear(hidden_channels, global_dim * 2),
+        )
+        self.spatial_observer = nn.Sequential(
+            nn.Conv2d(
+                hidden_channels + spatial_dim * 2 + 1,
+                hidden_channels,
+                1,
+            ),
+            nn.SiLU(),
+            nn.Conv2d(hidden_channels, spatial_dim * 2, 1),
+        )
+        self.category_head = nn.Linear(global_dim, num_categories)
+
+    def _accuracy_scale(self, logits: Tensor) -> Tensor:
+        return self.min_accuracy_scale + (
+            1.0 - self.min_accuracy_scale
+        ) * logits.sigmoid()
+
+    def adaptive_accuracy(
+        self,
+        base_accuracy: Tensor,
+        logits: Tensor,
+    ) -> Tensor:
+        """Construct the single adaptive alpha used by state and loss."""
+
+        return base_accuracy * self._accuracy_scale(logits)
+
+    def update_state(
+        self,
+        mean: Tensor,
+        precision: Tensor,
+        observation: Tensor,
+        accuracy: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Apply the frozen arm-specific update without adding parameters."""
+
+        if self.update_mode == "bayesian":
+            return self.flow.bayesian_update(
+                mean,
+                precision,
+                observation,
+                accuracy,
+            )
+        new_precision = precision + accuracy
+        # D interprets each head output as a deterministic residual increment.
+        # The same adaptive alpha and precision state gate that increment.
+        new_mean = mean + accuracy / new_precision.clamp_min(1e-8) * observation
+        return new_mean, new_precision
+
+    def forward(
+        self,
+        feature: Tensor,
+        *,
+        steps: int,
+        return_trajectory: bool = False,
+    ) -> dict[str, Tensor | list[Tensor]]:
+        if steps < 1:
+            raise ValueError("Latent BFN steps must be positive")
+        hidden = self.degradation_encoder(feature)
+        global_context = self.global_context(hidden.mean(dim=(-2, -1)))
+        spatial_size = (
+            max(1, feature.shape[-2] // self.spatial_downsample),
+            max(1, feature.shape[-1] // self.spatial_downsample),
+        )
+        spatial_context = self.spatial_context(
+            F.adaptive_avg_pool2d(hidden, spatial_size)
+        )
+
+        global_mean = feature.new_zeros((feature.shape[0], self.global_dim))
+        global_precision = feature.new_ones(global_mean.shape)
+        spatial_mean = feature.new_zeros(
+            (feature.shape[0], self.spatial_dim, *spatial_size)
+        )
+        spatial_precision = feature.new_ones(spatial_mean.shape)
+        global_observations: list[Tensor] = []
+        spatial_observations: list[Tensor] = []
+        global_accuracies: list[Tensor] = []
+        spatial_accuracies: list[Tensor] = []
+        trajectory: list[Tensor] = []
+
+        for index in range(1, steps + 1):
+            time = feature.new_full(
+                (feature.shape[0], 1),
+                (index - 1) / steps,
+            )
+            global_output = self.global_observer(
+                torch.cat(
+                    (
+                        global_context,
+                        global_mean,
+                        global_precision.clamp_min(1e-6).log(),
+                        time,
+                    ),
+                    dim=1,
                 )
-                
-                # Bayesian update: move mean towards prediction
-                # This implements the iterative refinement described after Eq 10
-                alpha_t = self.precision_schedule[min(step, self.num_steps - 1)]
-                current_mean = current_mean + alpha_t * (predicted_residual - current_mean) / (step + 1)
-            
-            return current_mean
+            )
+            global_observation, global_accuracy_logits = (
+                global_output.chunk(2, dim=1)
+            )
+            global_observation = global_observation.tanh()
 
+            time_map = time[:, :, None, None].expand(
+                -1,
+                -1,
+                *spatial_size,
+            )
+            spatial_output = self.spatial_observer(
+                torch.cat(
+                    (
+                        spatial_context,
+                        spatial_mean,
+                        spatial_precision.clamp_min(1e-6).log(),
+                        time_map,
+                    ),
+                    dim=1,
+                )
+            )
+            spatial_observation, spatial_accuracy_logits = (
+                spatial_output.chunk(2, dim=1)
+            )
+            spatial_observation = spatial_observation.tanh()
 
-class ReceiverNetwork(nn.Module):
-    """
-    Lightweight receiver network for BFN residual prediction.
-    
-    This implements the denoising function Ψ with conditional inputs:
-    - Noisy residual estimate
-    - Timestep embedding  
-    - Backbone features (condition)
-    """
-    
-    def __init__(self, in_channels, feature_dim, time_dim):
-        super().__init__()
-        
-        # Input projection
-        self.input_proj = nn.Conv2d(in_channels, 64, 3, 1, 1)
-        
-        # Conditioning projection
-        self.cond_proj = nn.Conv2d(feature_dim, 64, 1)
-        
-        # Time embedding projection
-        self.time_proj = nn.Sequential(
-            nn.Linear(time_dim, 128),
-            nn.SiLU(),
-            nn.Linear(128, 64)
+            base_accuracy = self.flow.step_accuracy(
+                index,
+                steps,
+                device=feature.device,
+                dtype=feature.dtype,
+            )
+            global_accuracy = self.adaptive_accuracy(
+                base_accuracy,
+                global_accuracy_logits
+            )
+            spatial_accuracy = self.adaptive_accuracy(
+                base_accuracy,
+                spatial_accuracy_logits
+            )
+            global_mean, global_precision = self.update_state(
+                global_mean,
+                global_precision,
+                global_observation,
+                global_accuracy,
+            )
+            spatial_mean, spatial_precision = self.update_state(
+                spatial_mean,
+                spatial_precision,
+                spatial_observation,
+                spatial_accuracy,
+            )
+            global_observations.append(global_observation)
+            spatial_observations.append(spatial_observation)
+            global_accuracies.append(global_accuracy)
+            spatial_accuracies.append(spatial_accuracy)
+            if return_trajectory:
+                trajectory.append(global_mean.clone())
+
+        return {
+            "global_mean": global_mean,
+            "global_precision": global_precision,
+            "spatial_mean": spatial_mean,
+            "spatial_precision": spatial_precision,
+            "category_logits": self.category_head(global_mean),
+            "global_observations": global_observations,
+            "spatial_observations": spatial_observations,
+            "global_accuracies": global_accuracies,
+            "spatial_accuracies": spatial_accuracies,
+            "trajectory": trajectory,
+        }
+
+    @staticmethod
+    def _weighted_mse(
+        prediction: Tensor,
+        target: Tensor,
+        weight: Tensor | None,
+    ) -> Tensor:
+        error = (prediction.float() - target.float()).square()
+        if weight is None:
+            return error.mean()
+        normalized = weight.detach().float()
+        normalized = normalized / normalized.mean().clamp_min(1e-8)
+        return (error * normalized).mean()
+
+    def latent_loss_weights(
+        self,
+        outputs: dict[str, Tensor | list[Tensor]],
+    ) -> tuple[Tensor | None, Tensor | None]:
+        if self.loss_weighting == "none":
+            return None, None
+        global_precision = outputs.get("global_precision")
+        spatial_precision = outputs.get("spatial_precision")
+        if not isinstance(global_precision, Tensor) or not isinstance(
+            spatial_precision,
+            Tensor,
+        ):
+            raise TypeError("Adaptive latent loss requires precision tensors")
+        return (
+            (global_precision - 1.0).detach(),
+            (spatial_precision - 1.0).detach(),
         )
-        
-        # Denoising backbone - lightweight ResNet-style
-        self.backbone = nn.ModuleList([
-            ResidualBlock(64 + 64, 64, time_dim=64),  # noisy + condition
-            ResidualBlock(64, 64, time_dim=64),
-            ResidualBlock(64, 64, time_dim=64),
-            ResidualBlock(64, 32, time_dim=64),
-        ])
-        
-        # Output projection
-        self.output_proj = nn.Conv2d(32, in_channels, 3, 1, 1)
-        
-    def forward(self, noisy_input, time_emb, condition):
-        """
-        Args:
-            noisy_input (Tensor): Noisy residual estimate [B, 3, H, W]
-            time_emb (Tensor): Time embedding [B, time_dim] 
-            condition (Tensor): Backbone features [B, feature_dim, H_cond, W_cond]
-        """
-        B, C, H, W = noisy_input.shape
-        
-        # Project inputs
-        x = self.input_proj(noisy_input)
-        cond = self.cond_proj(condition)
-        
-        # Upsample condition to match residual spatial dimensions
-        # Modern 2026 approach: use interpolation to align spatial dimensions
-        if cond.shape[-2:] != (H, W):
-            cond = F.interpolate(cond, size=(H, W), mode='bilinear', align_corners=False)
-        
-        # Fuse input and condition
-        x = torch.cat([x, cond], dim=1)
-        
-        # Process through backbone with time conditioning
-        for block in self.backbone:
-            x = block(x, time_emb)
-            
-        # Output clean residual
-        output = self.output_proj(x)
-        
-        return output
 
-
-class ResidualBlock(nn.Module):
-    """Time-conditioned residual block with GroupNorm."""
-    
-    def __init__(self, in_channels, out_channels, time_dim, num_groups=8):
-        super().__init__()
-        
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, 1, 1)
-        self.norm1 = nn.GroupNorm(min(num_groups, out_channels), out_channels)
-        
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, 1, 1)
-        self.norm2 = nn.GroupNorm(min(num_groups, out_channels), out_channels)
-        
-        # Time conditioning
-        self.time_proj = nn.Linear(time_dim, out_channels * 2)
-        
-        # Skip connection
-        self.skip = nn.Conv2d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
-        
-    def forward(self, x, time_emb):
-        identity = self.skip(x)
-        
-        # First convolution
-        h = self.conv1(x)
-        h = self.norm1(h)
-        
-        # Time conditioning (scale and shift)
-        time_params = self.time_proj(time_emb)  # [B, 2*C]
-        scale, shift = time_params.chunk(2, dim=-1)
-        scale = scale.unsqueeze(-1).unsqueeze(-1)  # [B, C, 1, 1]
-        shift = shift.unsqueeze(-1).unsqueeze(-1)
-        
-        h = h * (1 + scale) + shift
-        h = F.relu(h)
-        
-        # Second convolution
-        h = self.conv2(h)
-        h = self.norm2(h)
-        
-        return F.relu(h + identity)
-
-
-def test_bfn():
-    """Test function to verify BFN functionality."""
-    print("Testing Bayesian Flow Network...")
-    
-    # Test parameters
-    B, C, H, W = 2, 64, 32, 32
-    
-    # Create test inputs
-    condition = torch.randn(B, C, H, W)
-    residual_gt = torch.randn(B, 3, H, W)
-    
-    # Initialize BFN
-    bfn = BayesianFlowNetwork(feature_dim=C, num_steps=10)
-    
-    # Test training mode
-    bfn.train()
-    predicted_residual, precision = bfn(condition, residual_gt)
-    
-    print(f"Training mode:")
-    print(f"  Predicted residual shape: {predicted_residual.shape}")
-    print(f"  Precision: {precision:.4f}")
-    
-    # Test inference mode
-    bfn.eval()
-    with torch.no_grad():
-        refined_residual = bfn(condition)
-    
-    print(f"Inference mode:")
-    print(f"  Refined residual shape: {refined_residual.shape}")
-    print(f"Parameters: {sum(p.numel() for p in bfn.parameters()):,}")
-    
-    print("✓ BFN test passed!")
-
-
-if __name__ == "__main__":
-    test_bfn()
+    def latent_loss(
+        self,
+        outputs: dict[str, Tensor | list[Tensor]],
+        global_target: Tensor,
+        spatial_target: Tensor,
+    ) -> Tensor:
+        global_mean = outputs["global_mean"]
+        spatial_mean = outputs["spatial_mean"]
+        if not isinstance(global_mean, Tensor) or not isinstance(
+            spatial_mean,
+            Tensor,
+        ):
+            raise TypeError("Latent means must be tensors")
+        global_weight, spatial_weight = self.latent_loss_weights(outputs)
+        losses = [
+            self._weighted_mse(global_mean, global_target, global_weight),
+            self._weighted_mse(spatial_mean, spatial_target, spatial_weight),
+        ]
+        if self.loss_mode == "all_observations":
+            global_accuracies = outputs.get("global_accuracies")
+            spatial_accuracies = outputs.get("spatial_accuracies")
+            if self.loss_weighting == "adaptive_accuracy" and (
+                not isinstance(global_accuracies, list)
+                or not isinstance(spatial_accuracies, list)
+            ):
+                raise TypeError(
+                    "Adaptive observation loss requires per-step accuracies"
+                )
+            for index, observation in enumerate(
+                outputs["global_observations"]
+            ):
+                losses.append(
+                    self._weighted_mse(
+                        observation,
+                        global_target,
+                        (
+                            global_accuracies[index]
+                            if isinstance(global_accuracies, list)
+                            else None
+                        ),
+                    )
+                )
+            for index, observation in enumerate(
+                outputs["spatial_observations"]
+            ):
+                losses.append(
+                    self._weighted_mse(
+                        observation,
+                        spatial_target,
+                        (
+                            spatial_accuracies[index]
+                            if isinstance(spatial_accuracies, list)
+                            else None
+                        ),
+                    )
+                )
+        return torch.stack(losses).mean()
